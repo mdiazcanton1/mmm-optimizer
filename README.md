@@ -158,6 +158,7 @@ Proyecto académico - ITBA 2025
 ---
 
 **Autores**: Matías Díaz Cantón - Liam Mac Gaw - Ariel Waisburg
+
 **Institución**: ITBA  
 **Fecha**: Noviembre 2025
 

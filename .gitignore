@@ -25,12 +25,12 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Generated files (se regeneran al ejecutar)
-curvas_hill_por_cliente.pkl
-modelo_notebook2.pkl
-atribucion_incremental.csv
-modelo_features.csv
-dataset_limpio_sin_multicolinealidad.csv
+# Generated files (incluidos para ejecución directa)
+# curvas_hill_por_cliente.pkl
+# modelo_notebook2.pkl
+# atribucion_incremental.csv
+# modelo_features.csv
+# dataset_limpio_sin_multicolinealidad.csv
 
 # Datos originales grandes (opcional - comentar si quieres incluirlos)
 # dataset_consolidado_completo.csv

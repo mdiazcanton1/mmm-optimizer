@@ -1,0 +1,33 @@
+variable,tipo
+Brecha Cambiaria (%),modelo
+Costo_fijo_num,modelo
+IPC Prendas de vestir y calzado,modelo
+Margen_pct,modelo
+Salario real,modelo
+Tasa de desocupación abierta,modelo
+Ticket_promedio_num,modelo
+Variación Estimador Mensual de Actividad Económica,modelo
+Variación IPC (%) General,modelo
+Variación Ventas en Supermercados y Shoppings,modelo
+average_sessions_durations_GA,modelo
+bounce_rate_GA,modelo
+evt_Black Friday,modelo
+evt_Carnaval,modelo
+evt_Cyber Monday,modelo
+evt_Dia de la Madre,modelo
+evt_Dia del Padre,modelo
+evt_Hot Sale,modelo
+evt_Navidad,modelo
+evt_San Valentin,modelo
+evt_Semana Santa,modelo
+impressions_GADS,modelo
+impressions_META,modelo
+invest_total_paid,modelo
+revenue_GADS,modelo
+revenue_META,modelo
+tc_prom_mes,modelo
+ticket_est_m,modelo
+transactions_GADS,modelo
+Índice Estimador Mensual de Actividad Económica,modelo
+Índice Ventas en Supermercados y Shoppings,modelo
+Índice de Confianza del Consumidor,modelo

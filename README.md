@@ -73,34 +73,39 @@ python -m streamlit run app_streamlit_pooled.py
 
 La app se abrirá en `http://localhost:8501`
 
+> **Nota:** Los archivos generados (modelos, curvas, datasets procesados) ya están incluidos en el repositorio. ¡Puedes ejecutar la app inmediatamente sin correr los notebooks!
+
 ## 📊 Flujo de Trabajo
 
-### Paso 1: EDA y Limpieza de Datos
-Ejecutar `1_EDA_y_Correlaciones.ipynb`:
-- Carga y limpieza de datos
-- Análisis de multicolinealidad (VIF)
-- Generación de `dataset_limpio_sin_multicolinealidad.csv`
+### Ejecución Directa (Recomendado)
 
-### Paso 2: Entrenar Modelo MMM
-Ejecutar `2_Modelo_MMM.ipynb`:
-- Entrenamiento de modelo pooled
-- Cálculo de atribución incremental
-- Generación de `modelo_notebook2.pkl` y `atribucion_incremental.csv`
+**Los archivos ya están generados** ✅ - Solo ejecuta:
 
-### Paso 3: Generar Curvas Hill
-Ejecutar `3_Curvas_Respuesta_Optimizacion.ipynb`:
-- Ajuste de curvas de respuesta por cliente
-- Generación de `curvas_hill_por_cliente.pkl`
+```bash
+EJECUTAR_AQUI.bat
+```
 
-### Paso 4: Usar la App
-Ejecutar `EJECUTAR_AQUI.bat`:
-- La app verifica y genera archivos faltantes automáticamente
-- Interfaz interactiva con 5 páginas:
+La app abrirá con 5 páginas interactivas:
   - 📁 **Datos**: Visualización de datos históricos
   - 🤖 **Modelo Pooled**: Diagnóstico del modelo
   - 💰 **Optimizar Presupuesto**: Optimización de inversión
   - 📉 **Análisis de Saturación**: Curvas de profit y ROI
   - 📈 **Dashboards**: Visualizaciones generales
+
+### Regeneración desde Cero (Opcional)
+
+Si quieres regenerar los archivos desde cero:
+
+1. **Ejecutar Notebook 1**: `1_EDA_y_Correlaciones.ipynb`
+   - Genera: `dataset_limpio_sin_multicolinealidad.csv`, `modelo_features.csv`
+
+2. **Ejecutar Notebook 2**: `2_Modelo_MMM.ipynb`
+   - Genera: `modelo_notebook2.pkl`, `atribucion_incremental.csv`
+
+3. **Ejecutar Notebook 3**: `3_Curvas_Respuesta_Optimizacion.ipynb`
+   - Genera: `curvas_hill_por_cliente.pkl`
+
+4. **Ejecutar App**: `EJECUTAR_AQUI.bat`
 
 ## 🔧 Tecnologías Utilizadas
 

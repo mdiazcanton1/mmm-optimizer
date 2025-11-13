@@ -763,6 +763,7 @@ elif page == "💰 Distribuir Presupuesto Fijo":
         min_value=1.0,
         value=float(ticket_default),
         step=1.0,
+        key=f"ticket_opt_{selected_client}",
         help="Extraído del dataset. Puedes modificarlo si conoces un valor más preciso."
     )
     
@@ -856,7 +857,8 @@ elif page == "💰 Distribuir Presupuesto Fijo":
                     xaxis_title="Inversión Semanal (USD)",
                     yaxis_title="Transacciones Incrementales",
                     height=400,
-                    hovermode='x unified'
+                    hovermode='x unified',
+                    template='plotly_white'
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
@@ -1434,7 +1436,7 @@ elif page == "💰 Distribuir Presupuesto Fijo":
                                          marker_color='#e74c3c'))
                     fig1.update_layout(title='Distribución de Inversión (USD)',
                                       yaxis_title='Inversión (USD)',
-                                      barmode='stack', height=400)
+                                      barmode='stack', height=400, template='plotly_white')
                     st.plotly_chart(fig1, use_container_width=True)
                 
                 with col2:
@@ -1447,7 +1449,7 @@ elif page == "💰 Distribuir Presupuesto Fijo":
                         textposition='outside'
                     ))
                     fig2.update_layout(title='Profit Esperado (USD)',
-                                      yaxis_title='Profit (USD)', height=400)
+                                      yaxis_title='Profit (USD)', height=400, template='plotly_white')
                     st.plotly_chart(fig2, use_container_width=True)
                 
                 # Comparación ROI/ROAS
@@ -1463,7 +1465,7 @@ elif page == "💰 Distribuir Presupuesto Fijo":
                         textposition='outside'
                     ))
                     fig3.update_layout(title='ROI (%)',
-                                      yaxis_title='ROI (%)', height=400)
+                                      yaxis_title='ROI (%)', height=400, template='plotly_white')
                     st.plotly_chart(fig3, use_container_width=True)
                 
                 with col2:
@@ -1476,7 +1478,7 @@ elif page == "💰 Distribuir Presupuesto Fijo":
                         textposition='outside'
                     ))
                     fig4.update_layout(title='ROAS',
-                                      yaxis_title='ROAS (x)', height=400)
+                                      yaxis_title='ROAS (x)', height=400, template='plotly_white')
                     st.plotly_chart(fig4, use_container_width=True)
                 
                 # Recomendación
@@ -1567,7 +1569,7 @@ elif page == "📉 Encontrar Presupuesto Óptimo":
             min_value=1.0,
             value=float(ticket_default),
             step=1.0,
-            key='sat_ticket'
+            key=f"sat_ticket_{selected_client}"
         )
     with col2:
         max_budget_analysis = st.number_input(
@@ -1775,7 +1777,8 @@ elif page == "📉 Encontrar Presupuesto Óptimo":
                 yaxis_title="Profit (USD)",
                 hovermode='x unified',
                 height=500,
-                showlegend=False
+                showlegend=False,
+                template='plotly_white'
             )
             
             st.plotly_chart(fig1, use_container_width=True)
@@ -1826,11 +1829,12 @@ elif page == "📉 Encontrar Presupuesto Óptimo":
             fig2.update_layout(
                 title=f"ROI y ROAS vs Presupuesto - {selected_client}",
                 xaxis_title="Presupuesto Semanal (USD)",
-                yaxis=dict(title="ROI (%)", titlefont=dict(color='#3498db')),
-                yaxis2=dict(title="ROAS (x)", overlaying='y', side='right', 
-                           titlefont=dict(color='#e74c3c')),
+                yaxis=dict(title=dict(text="ROI (%)", font=dict(color='#3498db'))),
+                yaxis2=dict(title=dict(text="ROAS (x)", font=dict(color='#e74c3c')), 
+                           overlaying='y', side='right'),
                 hovermode='x unified',
-                height=500
+                height=500,
+                template='plotly_white'
             )
             
             st.plotly_chart(fig2, use_container_width=True)
@@ -1884,7 +1888,8 @@ elif page == "📉 Encontrar Presupuesto Óptimo":
                     xaxis_title="Presupuesto Semanal (USD)",
                     yaxis_title="ROI Marginal = d(Profit) / d(Presupuesto)",
                     hovermode='x unified',
-                    height=500
+                    height=500,
+                    template='plotly_white'
                 )
                 
                 st.plotly_chart(fig3, use_container_width=True)
@@ -2015,7 +2020,7 @@ elif page == "📈 Dashboards":
         fig = px.bar(df_stats.head(15), x='Cliente', y='Trans Promedio',
                     title='Top 15 Clientes por Transacciones Promedio',
                     color='Trans Promedio', color_continuous_scale='RdYlGn')
-        fig.update_layout(xaxis_tickangle=-45, height=400)
+        fig.update_layout(xaxis_tickangle=-45, height=400, template='plotly_white')
         st.plotly_chart(fig, use_container_width=True)
     
     with col2:
@@ -2025,7 +2030,7 @@ elif page == "📈 Dashboards":
         fig.add_trace(go.Bar(name='GADS', x=df_stats['Cliente'].head(15), 
                             y=df_stats['GADS Incr'].head(15)))
         fig.update_layout(title='Incremental por Canal (Top 15)',
-                         barmode='group', xaxis_tickangle=-45, height=400)
+                         barmode='group', xaxis_tickangle=-45, height=400, template='plotly_white')
         st.plotly_chart(fig, use_container_width=True)
     
     # Gráfico de Ticket USD
@@ -2033,7 +2038,7 @@ elif page == "📈 Dashboards":
     fig = px.bar(df_stats.head(15), x='Cliente', y='Ticket USD',
                 title='Top 15 Clientes por Ticket Promedio',
                 color='Ticket USD', color_continuous_scale='Blues')
-    fig.update_layout(xaxis_tickangle=-45, height=400)
+    fig.update_layout(xaxis_tickangle=-45, height=400, template='plotly_white')
     st.plotly_chart(fig, use_container_width=True)
     
     # Tabla completa

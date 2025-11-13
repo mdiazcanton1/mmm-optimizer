@@ -10,7 +10,7 @@ import numpy as np
 import pickle
 import plotly.graph_objects as go
 import plotly.express as px
-from scipy.optimize import differential_evolution, NonlinearConstraint
+from scipy.optimize import minimize, LinearConstraint
 
 # Configuración
 st.set_page_config(
@@ -87,7 +87,16 @@ def hill_scaled(x, alpha, k, beta):
     return beta * (np.power(x, alpha) / (np.power(k, alpha) + np.power(x, alpha)))
 
 def estimate_transactions(invest_META, invest_GADS, cliente, model, df_hist, curvas_hill=None):
-    """Estima transacciones usando curvas Hill del cliente o aproximación"""
+    """
+    Estima transacciones INCREMENTALES usando curvas Hill del cliente o aproximación.
+    
+    Returns:
+        dict con:
+            - 'total': total de transacciones incrementales (META + GADS)
+            - 'META': transacciones incrementales solo de META
+            - 'GADS': transacciones incrementales solo de GADS
+            - 'baseline': baseline orgánico (solo para referencia, NO se usa en ROI/ROAS)
+    """
     
     # Si hay curvas Hill disponibles, usarlas
     if curvas_hill and cliente in curvas_hill:
@@ -107,7 +116,12 @@ def estimate_transactions(invest_META, invest_GADS, cliente, model, df_hist, cur
             GADS_incr = hill_scaled(invest_GADS, curva_gads["alpha"], 
                                    curva_gads["k"], curva_gads["beta"])
         
-        return max(0, baseline + META_incr + GADS_incr)
+        return {
+            'total': max(0, META_incr + GADS_incr),
+            'META': max(0, META_incr),
+            'GADS': max(0, GADS_incr),
+            'baseline': baseline
+        }
     
     # Fallback: aproximación logarítmica (si no hay curvas)
     atribucion = model["atribucion"]
@@ -115,7 +129,7 @@ def estimate_transactions(invest_META, invest_GADS, cliente, model, df_hist, cur
     df_cliente_hist = df_hist[df_hist["empresa"] == cliente]
     
     if len(df_cliente_attr) == 0 or len(df_cliente_hist) == 0:
-        return 0
+        return {'total': 0, 'META': 0, 'GADS': 0, 'baseline': 0}
     
     invest_META_hist = df_cliente_hist[df_cliente_hist["invest_META"] > 0]["invest_META"].mean()
     invest_GADS_hist = df_cliente_hist[df_cliente_hist["invest_GADS"] > 0]["invest_GADS"].mean()
@@ -135,110 +149,333 @@ def estimate_transactions(invest_META, invest_GADS, cliente, model, df_hist, cur
     META_incr = META_incr_hist * ratio_META * 0.8
     GADS_incr = GADS_incr_hist * ratio_GADS * 0.8
     
-    return max(0, y_base + META_incr + GADS_incr)
+    return {
+        'total': max(0, META_incr + GADS_incr),
+        'META': max(0, META_incr),
+        'GADS': max(0, GADS_incr),
+        'baseline': y_base
+    }
 
-def optimize_budget_roi(cliente, total_budget, ticket_usd, model, df_hist, curvas_hill=None,
-                        min_invest_meta=0, min_invest_gads=0, optimize_for='profit'):
+def optimize_distribution_for_fixed_budget(cliente, budget_total, ticket_usd, model, df_hist, curvas_hill=None,
+                                           min_invest_meta=0, min_invest_gads=0, optimize_for='profit',
+                                           force_full_budget=False):
     """
-    Optimiza distribución META/GADS maximizando ROI/ROAS o profit
+    Optimiza SOLO la distribución META/GADS para un presupuesto total FIJO.
+    
+    Esta función NO busca el presupuesto óptimo, solo encuentra la mejor manera
+    de distribuir un presupuesto dado entre META y GADS.
     
     Args:
-        optimize_for: 'profit' (revenue - inversión), 'roi' (ROI %), 'roas' (ROAS), 'transactions'
+        budget_total: Presupuesto FIJO a distribuir
+        optimize_for: 'profit', 'roi', 'roas', o 'transactions'
+        force_full_budget: Si True, FUERZA usar exactamente budget_total (para sección "Distribuir Presupuesto Fijo")
+                          Si False, permite usar menos (para búsqueda del óptimo)
+    
+    Returns:
+        Dict con métricas para este presupuesto específico
     """
+    if budget_total <= 0:
+        return {
+            'invest_META': 0,
+            'invest_GADS': 0,
+            'invest_total': 0,
+            'trans': 0,
+            'trans_META': 0,
+            'trans_GADS': 0,
+            'revenue': 0,
+            'revenue_META': 0,
+            'revenue_GADS': 0,
+            'profit': 0,
+            'roi': 0,
+            'roas': 0,
+            'objective_value': 0
+        }
     
     def objective(x):
         invest_META, invest_GADS = x[0], x[1]
         invest_total = invest_META + invest_GADS
         
-        # Estimar transacciones
-        trans = estimate_transactions(invest_META, invest_GADS, cliente, model, df_hist, curvas_hill)
+        # Estimar transacciones INCREMENTALES
+        trans_dict = estimate_transactions(invest_META, invest_GADS, cliente, model, df_hist, curvas_hill)
+        trans_incr = trans_dict['total']
+        revenue_incr = trans_incr * ticket_usd
+        profit = revenue_incr - invest_total
         
-        # Calcular revenue
-        revenue = trans * ticket_usd
-        
-        # Según el objetivo
+        # Según el objetivo (retornar negativo para minimizar = maximizar)
         if optimize_for == 'profit':
-            return -(revenue - invest_total)  # Maximizar profit
+            return -profit
         elif optimize_for == 'roi':
-            roi = (revenue - invest_total) / invest_total if invest_total > 0 else 0
-            return -roi  # Maximizar ROI
+            roi = profit / invest_total if invest_total > 0 else 0
+            return -roi
         elif optimize_for == 'roas':
-            roas = revenue / invest_total if invest_total > 0 else 0
-            return -roas  # Maximizar ROAS
+            roas = revenue_incr / invest_total if invest_total > 0 else 0
+            return -roas
         else:  # transactions
-            return -trans
+            return -trans_incr
     
-    # Constraint: x[0] + x[1] <= total_budget
-    def budget_constraint_fun(x):
-        return np.array([total_budget - x[0] - x[1]])
+    # Restricción según el modo
+    if force_full_budget:
+        # FORZAR usar EXACTAMENTE budget_total (para "Distribuir Presupuesto Fijo")
+        constraint = LinearConstraint([[1, 1]], lb=budget_total, ub=budget_total)
+    else:
+        # Permitir usar menos (para "Encontrar Presupuesto Óptimo")
+        constraint = LinearConstraint([[1, 1]], lb=0, ub=budget_total)
     
-    nlc = NonlinearConstraint(budget_constraint_fun, 0, np.inf)
-    
-    result = differential_evolution(
+    # Optimizar distribución
+    result = minimize(
         objective,
-        bounds=[(min_invest_meta, total_budget), (min_invest_gads, total_budget)],
-        constraints=(nlc,),
-        seed=42,
-        maxiter=100
+        x0=[budget_total * 0.5, budget_total * 0.5],
+        method='SLSQP',
+        bounds=[(min_invest_meta, budget_total), (min_invest_gads, budget_total)],
+        constraints=[constraint],
+        options={'ftol': 1e-9, 'maxiter': 200}
     )
     
-    invest_META_opt = result.x[0]
-    invest_GADS_opt = result.x[1]
-    invest_total_opt = invest_META_opt + invest_GADS_opt
-    trans_opt = estimate_transactions(invest_META_opt, invest_GADS_opt, cliente, model, df_hist, curvas_hill)
+    invest_META = result.x[0]
+    invest_GADS = result.x[1]
+    invest_total = invest_META + invest_GADS
+    
+    trans_dict = estimate_transactions(invest_META, invest_GADS, cliente, model, df_hist, curvas_hill)
+    trans = trans_dict['total']
+    trans_META = trans_dict['META']
+    trans_GADS = trans_dict['GADS']
+    
+    revenue = trans * ticket_usd
+    revenue_META = trans_META * ticket_usd
+    revenue_GADS = trans_GADS * ticket_usd
+    
+    profit = revenue - invest_total
+    roi = profit / invest_total if invest_total > 0 else 0
+    roas = revenue / invest_total if invest_total > 0 else 0
+    
+    return {
+        'invest_META': invest_META,
+        'invest_GADS': invest_GADS,
+        'invest_total': invest_total,
+        'trans': trans,
+        'trans_META': trans_META,
+        'trans_GADS': trans_GADS,
+        'revenue': revenue,
+        'revenue_META': revenue_META,
+        'revenue_GADS': revenue_GADS,
+        'profit': profit,
+        'roi': roi,
+        'roas': roas,
+        'objective_value': -result.fun
+    }
+
+def optimize_budget_roi(cliente, total_budget, ticket_usd, model, df_hist, curvas_hill=None,
+                        min_invest_meta=0, min_invest_gads=0, optimize_for='profit'):
+    """
+    Encuentra el presupuesto total óptimo Y su distribución META/GADS.
+    
+    MÉTODO v4.2 CORREGIDO: 
+    - Grid search con GRANULARIDAD FIJA ($50) sobre diferentes presupuestos totales
+    - Para CADA presupuesto, optimiza distribución META/GADS usando función separada
+    - Refinamiento con pasos de $10 en ±5% del óptimo
+    - Resultados consistentes independientemente del presupuesto máximo ingresado
+    
+    Args:
+        total_budget: Presupuesto MÁXIMO disponible (puede usar menos)
+        optimize_for: 'profit' (revenue - inversión), 'roi' (ROI %), 'roas' (ROAS), 'transactions'
+    
+    Returns:
+        Dict con métricas del óptimo y comparación vs 50/50
+    """
+    
+    # Usar la función compartida que optimiza distribución para un presupuesto fijo
+    def optimize_distribution_for_budget(budget_total):
+        return optimize_distribution_for_fixed_budget(
+            cliente, budget_total, ticket_usd, model, df_hist, curvas_hill,
+            min_invest_meta, min_invest_gads, optimize_for
+        )
+    
+    # GRID SEARCH sobre diferentes presupuestos totales
+    # Usar GRANULARIDAD FIJA en dólares (no porcentajes) para consistencia
+    # Esto asegura que el resultado sea independiente del presupuesto máximo ingresado
+    step_size = 50  # Granularidad de $50 USD
+    budgets_to_test = np.arange(0, total_budget + step_size, step_size)
+    # Limitar a máximo 500 puntos para performance
+    if len(budgets_to_test) > 500:
+        budgets_to_test = np.linspace(0, total_budget, 500)
+    
+    best_result = None
+    best_objective = -np.inf
+    
+    for budget in budgets_to_test:
+        result = optimize_distribution_for_budget(budget)
+        
+        if result['objective_value'] > best_objective:
+            best_objective = result['objective_value']
+            best_result = result
+    
+    # Refinamiento: buscar en ±5% del mejor presupuesto con mayor detalle
+    # Usamos pasos de $10 para máxima precisión
+    if best_result['invest_total'] > 0:
+        refine_min = max(0, best_result['invest_total'] * 0.95)
+        refine_max = min(total_budget, best_result['invest_total'] * 1.05)
+        refine_step = 10  # Pasos de $10 para alta precisión
+        refine_budgets = np.arange(refine_min, refine_max + refine_step, refine_step)
+        
+        for budget in refine_budgets:
+            result = optimize_distribution_for_budget(budget)
+            if result['objective_value'] > best_objective:
+                best_objective = result['objective_value']
+                best_result = result
+    
+    # Resultados ÓPTIMOS finales
+    invest_META_opt = best_result['invest_META']
+    invest_GADS_opt = best_result['invest_GADS']
+    invest_total_opt = best_result['invest_total']
+    
+    trans_dict_opt = estimate_transactions(invest_META_opt, invest_GADS_opt, cliente, model, df_hist, curvas_hill)
+    trans_opt = trans_dict_opt['total']
+    trans_META_opt = trans_dict_opt['META']
+    trans_GADS_opt = trans_dict_opt['GADS']
+    baseline_opt = trans_dict_opt['baseline']
+    
     revenue_opt = trans_opt * ticket_usd
+    revenue_META_opt = trans_META_opt * ticket_usd
+    revenue_GADS_opt = trans_GADS_opt * ticket_usd
+    
     profit_opt = revenue_opt - invest_total_opt
     roi_opt = (revenue_opt - invest_total_opt) / invest_total_opt if invest_total_opt > 0 else 0
     roas_opt = revenue_opt / invest_total_opt if invest_total_opt > 0 else 0
     
-    # Caso actual (50/50)
+    # Métricas por canal (óptimo)
+    roi_META_opt = (revenue_META_opt - invest_META_opt) / invest_META_opt if invest_META_opt > 0 else 0
+    roas_META_opt = revenue_META_opt / invest_META_opt if invest_META_opt > 0 else 0
+    roi_GADS_opt = (revenue_GADS_opt - invest_GADS_opt) / invest_GADS_opt if invest_GADS_opt > 0 else 0
+    roas_GADS_opt = revenue_GADS_opt / invest_GADS_opt if invest_GADS_opt > 0 else 0
+    
+    # Caso ACTUAL (50/50)
     invest_META_actual = total_budget * 0.5
     invest_GADS_actual = total_budget * 0.5
-    trans_actual = estimate_transactions(invest_META_actual, invest_GADS_actual, 
-                                        cliente, model, df_hist, curvas_hill)
+    
+    trans_dict_actual = estimate_transactions(invest_META_actual, invest_GADS_actual, 
+                                              cliente, model, df_hist, curvas_hill)
+    trans_actual = trans_dict_actual['total']
+    trans_META_actual = trans_dict_actual['META']
+    trans_GADS_actual = trans_dict_actual['GADS']
+    
     revenue_actual = trans_actual * ticket_usd
+    revenue_META_actual = trans_META_actual * ticket_usd
+    revenue_GADS_actual = trans_GADS_actual * ticket_usd
+    
     profit_actual = revenue_actual - total_budget
     roi_actual = (revenue_actual - total_budget) / total_budget if total_budget > 0 else 0
     roas_actual = revenue_actual / total_budget if total_budget > 0 else 0
     
+    # Métricas por canal (actual)
+    roi_META_actual = (revenue_META_actual - invest_META_actual) / invest_META_actual if invest_META_actual > 0 else 0
+    roas_META_actual = revenue_META_actual / invest_META_actual if invest_META_actual > 0 else 0
+    roi_GADS_actual = (revenue_GADS_actual - invest_GADS_actual) / invest_GADS_actual if invest_GADS_actual > 0 else 0
+    roas_GADS_actual = revenue_GADS_actual / invest_GADS_actual if invest_GADS_actual > 0 else 0
+    
     return {
+        # Inversiones
         'invest_META_opt': invest_META_opt,
         'invest_GADS_opt': invest_GADS_opt,
         'invest_total_opt': invest_total_opt,
-        'trans_opt': trans_opt,
-        'revenue_opt': revenue_opt,
-        'profit_opt': profit_opt,
-        'roi_opt': roi_opt,
-        'roas_opt': roas_opt,
         'invest_META_actual': invest_META_actual,
         'invest_GADS_actual': invest_GADS_actual,
+        
+        # Transacciones INCREMENTALES (total)
+        'trans_opt': trans_opt,
         'trans_actual': trans_actual,
-        'revenue_actual': revenue_actual,
-        'profit_actual': profit_actual,
-        'roi_actual': roi_actual,
-        'roas_actual': roas_actual,
         'delta_trans': trans_opt - trans_actual,
+        
+        # Transacciones por canal (óptimo)
+        'trans_META_opt': trans_META_opt,
+        'trans_GADS_opt': trans_GADS_opt,
+        'trans_META_actual': trans_META_actual,
+        'trans_GADS_actual': trans_GADS_actual,
+        
+        # Baseline (para referencia)
+        'baseline': baseline_opt,
+        
+        # Revenue INCREMENTAL (total)
+        'revenue_opt': revenue_opt,
+        'revenue_actual': revenue_actual,
         'delta_revenue': revenue_opt - revenue_actual,
+        
+        # Revenue por canal (óptimo)
+        'revenue_META_opt': revenue_META_opt,
+        'revenue_GADS_opt': revenue_GADS_opt,
+        'revenue_META_actual': revenue_META_actual,
+        'revenue_GADS_actual': revenue_GADS_actual,
+        
+        # Profit, ROI, ROAS (total)
+        'profit_opt': profit_opt,
+        'profit_actual': profit_actual,
         'delta_profit': profit_opt - profit_actual,
+        'roi_opt': roi_opt,
+        'roi_actual': roi_actual,
         'delta_roi': roi_opt - roi_actual,
-        'delta_roas': roas_opt - roas_actual
+        'roas_opt': roas_opt,
+        'roas_actual': roas_actual,
+        'delta_roas': roas_opt - roas_actual,
+        
+        # ROI por canal (óptimo)
+        'roi_META_opt': roi_META_opt,
+        'roi_GADS_opt': roi_GADS_opt,
+        'roi_META_actual': roi_META_actual,
+        'roi_GADS_actual': roi_GADS_actual,
+        
+        # ROAS por canal (óptimo)
+        'roas_META_opt': roas_META_opt,
+        'roas_GADS_opt': roas_GADS_opt,
+        'roas_META_actual': roas_META_actual,
+        'roas_GADS_actual': roas_GADS_actual
     }
 
 def analyze_saturation(cliente, ticket_usd, model, df_hist, curvas_hill=None, max_budget=50000, n_points=100):
     """
-    Analiza punto de saturación donde ROI marginal = 0
+    Analiza punto de saturación donde ROI marginal = 0.
+    Usa solo transacciones INCREMENTALES (sin baseline).
+    
+    MÉTODO CORREGIDO:
+    1. Primero busca el presupuesto óptimo usando optimize_budget_roi (con granularidad fija $50)
+    2. Luego genera curva de saturación alrededor del óptimo para visualización
     
     Returns dict con:
         - budgets: array de presupuestos
-        - transactions: transacciones esperadas
-        - revenues: revenue esperado
+        - transactions: transacciones INCREMENTALES esperadas
+        - revenues: revenue INCREMENTAL esperado
         - profits: profit esperado
         - rois: ROI en cada punto
         - roas: ROAS en cada punto
         - marginal_roi: ROI marginal (derivada)
-        - optimal_budget: presupuesto óptimo (donde ROI marginal ≈ 0)
+        - optimal_budget: presupuesto óptimo (donde profit es máximo)
     """
-    budgets = np.linspace(0, max_budget, n_points)
+    
+    # PASO 1: Buscar presupuesto óptimo con optimize_budget_roi
+    # Esto asegura que encontramos el VERDADERO óptimo independientemente de max_budget
+    optimal_result = optimize_budget_roi(
+        cliente, max_budget, ticket_usd, model, df_hist, curvas_hill,
+        min_invest_meta=0, min_invest_gads=0, optimize_for='profit'
+    )
+    
+    # USAR DIRECTAMENTE el presupuesto óptimo encontrado por optimize_budget_roi
+    optimal_budget_real = optimal_result['invest_total_opt']
+    optimal_profit_real = optimal_result['profit_opt']
+    optimal_roi_real = optimal_result['roi_opt']
+    optimal_roas_real = optimal_result['roas_opt']
+    
+    # PASO 2: Generar curva de saturación para visualización
+    # Asegurarse que el presupuesto óptimo REAL esté incluido en la curva
+    
+    # Puntos hasta el óptimo (50% de los puntos)
+    n_before = int(n_points * 0.5)
+    budgets_before = np.linspace(0, optimal_budget_real, n_before) if optimal_budget_real > 0 else np.array([0])
+    
+    # Puntos después del óptimo (50% restante)
+    n_after = n_points - n_before
+    budgets_after = np.linspace(optimal_budget_real, max_budget, n_after)[1:]  # Skip duplicate
+    
+    # Combinar - el óptimo REAL está garantizado en la posición n_before-1
+    budgets = np.concatenate([budgets_before, budgets_after])
+    
     results = []
     
     for budget in budgets:
@@ -253,29 +490,45 @@ def analyze_saturation(cliente, ticket_usd, model, df_hist, curvas_hill=None, ma
             })
             continue
         
-        # Optimizar para este presupuesto
-        opt_result = optimize_budget_roi(cliente, budget, ticket_usd, model, df_hist, 
-                                        curvas_hill, optimize_for='profit')
+        # Optimizar SOLO la distribución para este presupuesto FIJO
+        opt_result = optimize_distribution_for_fixed_budget(
+            cliente, budget, ticket_usd, model, df_hist, curvas_hill, 
+            min_invest_meta=0, min_invest_gads=0, optimize_for='profit'
+        )
         
         results.append({
             'budget': budget,
-            'trans': opt_result['trans_opt'],
-            'revenue': opt_result['revenue_opt'],
-            'profit': opt_result['profit_opt'],
-            'roi': opt_result['roi_opt'],
-            'roas': opt_result['roas_opt']
+            'trans': opt_result['trans'],
+            'revenue': opt_result['revenue'],
+            'profit': opt_result['profit'],
+            'roi': opt_result['roi'],
+            'roas': opt_result['roas']
         })
     
     df_results = pd.DataFrame(results)
     
-    # Calcular ROI marginal (derivada numérica)
+    # Calcular ROI marginal (derivada numérica) para visualización
     marginal_roi = np.gradient(df_results['profit'], df_results['budget'])
     
-    # Encontrar punto óptimo (donde ROI marginal cruza 1.0, es decir, cada $1 adicional genera $1)
-    # ROI marginal = d(profit)/d(budget) = d(revenue - budget)/d(budget) = d(revenue)/d(budget) - 1
-    # Queremos d(revenue)/d(budget) = 1, es decir, marginal_roi = 0
-    optimal_idx = np.argmin(np.abs(marginal_roi))
-    optimal_budget = df_results['budget'].iloc[optimal_idx]
+    # Encontrar índice del presupuesto óptimo en la curva (para marcar en gráficos)
+    # Buscar el punto más cercano al óptimo real
+    optimal_idx = np.argmin(np.abs(df_results['budget'] - optimal_budget_real))
+    
+    # Encontrar punto de SATURACIÓN: donde ROI marginal ≈ 0
+    # Este es el punto donde cada $1 adicional genera <$1 de revenue
+    # Buscar solo después del óptimo para evitar el punto inicial
+    saturation_idx = optimal_idx
+    if optimal_idx < len(marginal_roi) - 1:
+        # Buscar donde marginal_roi cruza 0 después del óptimo
+        roi_after_optimal = marginal_roi[optimal_idx:]
+        zero_crossings = np.where(roi_after_optimal <= 0)[0]
+        if len(zero_crossings) > 0:
+            saturation_idx = optimal_idx + zero_crossings[0]
+        else:
+            # Si nunca cruza 0, usar el último punto
+            saturation_idx = len(marginal_roi) - 1
+    
+    saturation_budget = df_results['budget'].iloc[saturation_idx]
     
     return {
         'budgets': df_results['budget'].values,
@@ -285,10 +538,15 @@ def analyze_saturation(cliente, ticket_usd, model, df_hist, curvas_hill=None, ma
         'rois': df_results['roi'].values,
         'roas': df_results['roas'].values,
         'marginal_roi': marginal_roi,
-        'optimal_budget': optimal_budget,
-        'optimal_profit': df_results['profit'].iloc[optimal_idx],
-        'optimal_roi': df_results['roi'].iloc[optimal_idx],
-        'optimal_roas': df_results['roas'].iloc[optimal_idx]
+        # Usar valores REALES del optimize_budget_roi (no de la curva)
+        'optimal_budget': optimal_budget_real,
+        'optimal_profit': optimal_profit_real,
+        'optimal_roi': optimal_roi_real,
+        'optimal_roas': optimal_roas_real,
+        'saturation_budget': saturation_budget,
+        'saturation_profit': df_results['profit'].iloc[saturation_idx],
+        'saturation_roi': df_results['roi'].iloc[saturation_idx],
+        'saturation_roas': df_results['roas'].iloc[saturation_idx]
     }
 
 # =============================================================================
@@ -296,13 +554,13 @@ def analyze_saturation(cliente, ticket_usd, model, df_hist, curvas_hill=None, ma
 # =============================================================================
 
 st.title("📊 Optimizer de Inversión Publicitaria + ROAS/ROI")
-st.markdown("### Modelo Pooled con Análisis de Saturación")
+st.markdown("### Modelo Pooled con Análisis de Saturación | Transacciones Incrementales")
 
 # Sidebar
 st.sidebar.title("🎯 Navegación")
 page = st.sidebar.radio("Selecciona una página:", 
-                        ["📁 Datos", "🤖 Modelo Pooled", "💰 Optimizar Presupuesto", 
-                         "📉 Análisis de Saturación", "📈 Dashboards"])
+                        ["📁 Datos", "🤖 Modelo Pooled", "💰 Distribuir Presupuesto Fijo", 
+                         "📉 Encontrar Presupuesto Óptimo", "📈 Dashboards"])
 
 # Cargar datos
 df = load_data()
@@ -412,7 +670,9 @@ elif page == "🤖 Modelo Pooled":
     st.info(f"""
     **Interpretación**:
     - El modelo fue entrenado con **{model['n_obs']:,} observaciones** de **{model['n_empresas']} empresas**
-    - Usa transformaciones avanzadas: Adstock (θ={model['transform_params']['theta_meta']}) + Saturación Hill (α={model['transform_params']['alpha_meta']})
+    - Usa transformaciones avanzadas **por canal** (parámetros independientes):
+      - **META**: Adstock θ={model['transform_params']['theta_meta']:.3f}, Hill α={model['transform_params']['alpha_meta']:.3f}
+      - **GADS**: Adstock θ={model['transform_params']['theta_gads']:.3f}, Hill α={model['transform_params']['alpha_gads']:.3f}
     - R² test = {r2_test:.4f} indica que el modelo explica **{r2_test*100:.1f}% de la varianza** en test
     - GADS tiene un efecto {"mayor" if beta_gads > beta_meta else "menor"} que META
     """)
@@ -437,11 +697,11 @@ elif page == "🤖 Modelo Pooled":
     st.dataframe(empresas_df, use_container_width=True)
 
 # =============================================================================
-# PÁGINA 3: OPTIMIZAR PRESUPUESTO (CON ROI)
+# PÁGINA 3: DISTRIBUIR PRESUPUESTO FIJO
 # =============================================================================
 
-elif page == "💰 Optimizar Presupuesto":
-    st.header("💰 Optimizar Presupuesto Publicitario + ROI")
+elif page == "💰 Distribuir Presupuesto Fijo":
+    st.header("💰 Distribuir Presupuesto Fijo entre META y GADS")
     
     if model is None:
         st.error("❌ Modelo no encontrado. Ejecuta: `python cargar_modelo_notebook.py`")
@@ -458,7 +718,21 @@ elif page == "💰 Optimizar Presupuesto":
         st.warning("⚠️ No se encontraron curvas Hill. Usando aproximación logarítmica (menos preciso)")
         st.info("💡 Para mejor precisión, ejecuta: `python ajustar_curvas_por_cliente.py`")
     
-    st.info("💡 El optimizer encuentra la mejor distribución META/GADS maximizando profit (revenue - inversión)")
+    st.info("""
+    💡 **¿Para qué sirve esta sección?**
+    
+    **Úsala cuando:** Ya tienes un presupuesto APROBADO/FIJO y necesitas decidir cómo distribuirlo entre META y GADS.
+    
+    **Ejemplo:** "Tengo $5,000 aprobados para esta semana. ¿Cuánto invierto en META y cuánto en GADS?"
+    
+    **Lo que hace:**
+    - Usa las **curvas de respuesta** de cada canal para optimizar la distribución
+    - **SIEMPRE gasta el presupuesto completo** (asume que es obligatorio gastarlo)
+    - Maximiza profit (revenue incremental - inversión) con ese presupuesto fijo
+    - Te compara vs distribución 50/50 para mostrar la mejora
+    
+    ⚠️ **Nota:** Si quieres saber **CUÁNTO deberías invertir** (presupuesto flexible), usa la sección "Encontrar Presupuesto Óptimo".
+    """)
     
     # Seleccionar cliente
     st.subheader("1️⃣ Selecciona Cliente")
@@ -483,22 +757,19 @@ elif page == "💰 Optimizar Presupuesto":
     
     # Permitir editar ticket USD
     st.subheader("2️⃣ Parámetros Económicos")
-    col1, col2 = st.columns(2)
-    with col1:
-        ticket_usd = st.number_input(
-            "Ticket Promedio (USD) - Editable",
-            min_value=1.0,
-            value=float(ticket_default),
-            step=1.0,
-            help="Extraído del dataset. Puedes modificarlo si conoces un valor más preciso."
-        )
-    with col2:
-        optimize_for = st.selectbox(
-            "Optimizar para:",
-            options=['profit', 'roi', 'roas', 'transactions'],
-            index=0,
-            help="profit = maximizar revenue - inversión | roi = maximizar ROI % | roas = maximizar ROAS | transactions = maximizar transacciones"
-        )
+    
+    ticket_usd = st.number_input(
+        "Ticket Promedio (USD) - Editable",
+        min_value=1.0,
+        value=float(ticket_default),
+        step=1.0,
+        help="Extraído del dataset. Puedes modificarlo si conoces un valor más preciso."
+    )
+    
+    # SIEMPRE optimizar para profit (no dar opción al usuario)
+    optimize_for = 'profit'
+    
+    st.info("💡 Esta sección siempre optimiza para **maximizar profit** (revenue - inversión).")
     
     # Mostrar curvas Hill del cliente
     if curvas_hill and selected_client in curvas_hill:
@@ -533,38 +804,77 @@ elif page == "💰 Optimizar Presupuesto":
             if curva["META"] or curva["GADS"]:
                 fig = go.Figure()
                 
-                # Rango de inversión para visualizar
-                max_invest = 10000
+                # Calcular rango dinámico: hasta 3x el punto de saturación (k) más alto
+                k_meta = curva["META"]["k"] if curva["META"] else 0
+                k_gads = curva["GADS"]["k"] if curva["GADS"] else 0
+                max_k = max(k_meta, k_gads)
+                
+                # Rango hasta 3x el punto de saturación más alto
+                max_invest = max(max_k * 3, 1000)  # Mínimo $1,000 para visualización
                 x_range = np.linspace(0, max_invest, 200)
                 
                 if curva["META"]:
                     y_meta = hill_scaled(x_range, curva["META"]["alpha"], 
                                        curva["META"]["k"], curva["META"]["beta"])
                     fig.add_trace(go.Scatter(x=x_range, y=y_meta, mode='lines',
-                                            name='META', line=dict(color='#3498db', width=3)))
+                                            name='META', line=dict(color='#3498db', width=3),
+                                            hovertemplate='Inversión: $%{x:,.0f}<br>Trans: %{y:.1f}<extra></extra>'))
+                    
+                    # Marcar punto k (saturación) de META
+                    y_meta_at_k = hill_scaled(k_meta, curva["META"]["alpha"], 
+                                             curva["META"]["k"], curva["META"]["beta"])
+                    fig.add_trace(go.Scatter(x=[k_meta], y=[y_meta_at_k], 
+                                            mode='markers+text',
+                                            name='Saturación META',
+                                            marker=dict(size=10, color='#3498db', symbol='circle'),
+                                            text=[f"k=${k_meta:,.0f}"],
+                                            textposition='top center',
+                                            showlegend=False,
+                                            hovertemplate='<b>Punto k META</b><br>$%{x:,.0f}<extra></extra>'))
                 
                 if curva["GADS"]:
                     y_gads = hill_scaled(x_range, curva["GADS"]["alpha"], 
                                        curva["GADS"]["k"], curva["GADS"]["beta"])
                     fig.add_trace(go.Scatter(x=x_range, y=y_gads, mode='lines',
-                                            name='GADS', line=dict(color='#e74c3c', width=3)))
+                                            name='GADS', line=dict(color='#e74c3c', width=3),
+                                            hovertemplate='Inversión: $%{x:,.0f}<br>Trans: %{y:.1f}<extra></extra>'))
+                    
+                    # Marcar punto k (saturación) de GADS
+                    y_gads_at_k = hill_scaled(k_gads, curva["GADS"]["alpha"], 
+                                             curva["GADS"]["k"], curva["GADS"]["beta"])
+                    fig.add_trace(go.Scatter(x=[k_gads], y=[y_gads_at_k], 
+                                            mode='markers+text',
+                                            name='Saturación GADS',
+                                            marker=dict(size=10, color='#e74c3c', symbol='circle'),
+                                            text=[f"k=${k_gads:,.0f}"],
+                                            textposition='top center',
+                                            showlegend=False,
+                                            hovertemplate='<b>Punto k GADS</b><br>$%{x:,.0f}<extra></extra>'))
                 
                 fig.update_layout(
                     title=f"Curvas de Respuesta - {selected_client}",
                     xaxis_title="Inversión Semanal (USD)",
                     yaxis_title="Transacciones Incrementales",
-                    height=400
+                    height=400,
+                    hovermode='x unified'
                 )
                 st.plotly_chart(fig, use_container_width=True)
+                
+                st.info(f"""
+                💡 **Rango del gráfico:** $0 - ${max_invest:,.0f} (3x el punto de saturación más alto)
+                
+                El punto **k** marca donde cada curva alcanza ~63% de su máximo (inicio de saturación fuerte).
+                """)
     
     # Definir presupuesto
-    st.subheader("3️⃣ Define Presupuesto")
+    st.subheader("3️⃣ Define Presupuesto FIJO")
     
     total_budget = st.number_input(
-        "Presupuesto total semanal (USD)",
+        "Presupuesto FIJO semanal (USD) - Se gastará TODO",
         min_value=0.0,
         value=5000.0,
-        step=100.0
+        step=100.0,
+        help="Este presupuesto se gastará COMPLETO. La app optimizará cómo distribuirlo entre META y GADS."
     )
     
     col1, col2 = st.columns(2)
@@ -574,11 +884,12 @@ elif page == "💰 Optimizar Presupuesto":
         min_gads = st.number_input("Mínimo GADS (USD)", min_value=0.0, value=0.0, step=100.0)
     
     # Optimizar
-    st.subheader("4️⃣ Optimizar")
+    st.subheader("4️⃣ Optimizar Distribución")
     
-    if st.button("🎯 Calcular Óptimo", type="primary"):
-        with st.spinner("Optimizando..."):
-            result = optimize_budget_roi(
+    if st.button("🎯 Calcular Distribución Óptima", type="primary"):
+        with st.spinner("Optimizando distribución..."):
+            # Usar función que FUERZA a gastar el presupuesto completo
+            result_opt = optimize_distribution_for_fixed_budget(
                 selected_client,
                 total_budget,
                 ticket_usd,
@@ -587,8 +898,74 @@ elif page == "💰 Optimizar Presupuesto":
                 curvas_hill,
                 min_meta,
                 min_gads,
-                optimize_for
+                optimize_for,
+                force_full_budget=True  # FORZAR usar TODO el presupuesto
             )
+            
+            # Calcular caso 50/50 para comparación
+            result_5050 = optimize_distribution_for_fixed_budget(
+                selected_client,
+                total_budget,
+                ticket_usd,
+                model,
+                df,
+                curvas_hill,
+                total_budget * 0.5,  # min META = 50%
+                total_budget * 0.5,  # min GADS = 50%
+                optimize_for,
+                force_full_budget=True
+            )
+            
+            # Construir resultado en formato compatible
+            result = {
+                # Óptimo
+                'invest_META_opt': result_opt['invest_META'],
+                'invest_GADS_opt': result_opt['invest_GADS'],
+                'invest_total_opt': result_opt['invest_total'],
+                'trans_opt': result_opt['trans'],
+                'trans_META_opt': result_opt['trans_META'],
+                'trans_GADS_opt': result_opt['trans_GADS'],
+                'revenue_opt': result_opt['revenue'],
+                'revenue_META_opt': result_opt['revenue_META'],
+                'revenue_GADS_opt': result_opt['revenue_GADS'],
+                'profit_opt': result_opt['profit'],
+                'roi_opt': result_opt['roi'],
+                'roas_opt': result_opt['roas'],
+                
+                # 50/50
+                'invest_META_actual': result_5050['invest_META'],
+                'invest_GADS_actual': result_5050['invest_GADS'],
+                'trans_actual': result_5050['trans'],
+                'trans_META_actual': result_5050['trans_META'],
+                'trans_GADS_actual': result_5050['trans_GADS'],
+                'revenue_actual': result_5050['revenue'],
+                'revenue_META_actual': result_5050['revenue_META'],
+                'revenue_GADS_actual': result_5050['revenue_GADS'],
+                'profit_actual': result_5050['profit'],
+                'roi_actual': result_5050['roi'],
+                'roas_actual': result_5050['roas'],
+                
+                # Deltas
+                'delta_trans': result_opt['trans'] - result_5050['trans'],
+                'delta_revenue': result_opt['revenue'] - result_5050['revenue'],
+                'delta_profit': result_opt['profit'] - result_5050['profit'],
+                'delta_roi': result_opt['roi'] - result_5050['roi'],
+                'delta_roas': result_opt['roas'] - result_5050['roas'],
+                
+                # Baseline (solo para referencia)
+                'baseline': 0  # No usado en esta sección
+            }
+            
+            # ROI/ROAS por canal
+            result['roi_META_opt'] = (result_opt['revenue_META'] - result_opt['invest_META']) / result_opt['invest_META'] if result_opt['invest_META'] > 0 else 0
+            result['roas_META_opt'] = result_opt['revenue_META'] / result_opt['invest_META'] if result_opt['invest_META'] > 0 else 0
+            result['roi_GADS_opt'] = (result_opt['revenue_GADS'] - result_opt['invest_GADS']) / result_opt['invest_GADS'] if result_opt['invest_GADS'] > 0 else 0
+            result['roas_GADS_opt'] = result_opt['revenue_GADS'] / result_opt['invest_GADS'] if result_opt['invest_GADS'] > 0 else 0
+            
+            result['roi_META_actual'] = (result_5050['revenue_META'] - result_5050['invest_META']) / result_5050['invest_META'] if result_5050['invest_META'] > 0 else 0
+            result['roas_META_actual'] = result_5050['revenue_META'] / result_5050['invest_META'] if result_5050['invest_META'] > 0 else 0
+            result['roi_GADS_actual'] = (result_5050['revenue_GADS'] - result_5050['invest_GADS']) / result_5050['invest_GADS'] if result_5050['invest_GADS'] > 0 else 0
+            result['roas_GADS_actual'] = result_5050['revenue_GADS'] / result_5050['invest_GADS'] if result_5050['invest_GADS'] > 0 else 0
             
             if result:
                 st.success("✅ Optimización completada")
@@ -683,53 +1060,85 @@ elif page == "💰 Optimizar Presupuesto":
                 # MÉTRICAS NORMALES (solo si inversión > 0)
                 # ============================================================
                 
-                st.subheader("📊 Resultados")
+                st.subheader("📊 Resultados - COMBINADOS (META + GADS)")
                 
-                col1, col2, col3, col4, col5 = st.columns(5)
-                with col1:
+                st.success(f"""
+                ✅ **Presupuesto FIJO:** ${total_budget:,.0f} USD (se gasta TODO)
+                
+                Esta sección optimiza **cómo distribuir** este presupuesto fijo entre META y GADS,
+                asumiendo que es obligatorio gastarlo completo.
+                """)
+                
+                st.info("""
+                💡 **Importante:** 
+                - Las transacciones y revenue mostrados son **INCREMENTALES** (atribuidos a la inversión publicitaria)
+                - Las flechitas 🔼🔽 comparan **DISTRIBUCIÓN ÓPTIMA** vs **50/50** (distribución igual entre canales)
+                - Ambas opciones gastan los ${:,.0f} USD completos, solo cambia la distribución
+                - Un delta negativo en transacciones puede ser normal si la distribución óptima prioriza profit sobre volumen
+                """.format(total_budget))
+                
+                # Primera fila: Distribución del presupuesto
+                st.markdown("### 💰 Distribución Óptima del Presupuesto")
+                col_budget = st.columns([1, 1, 1])
+                with col_budget[0]:
+                    st.metric(
+                        "Presupuesto Total",
+                        f"${total_budget:,.0f}",
+                        "100% (fijo)",
+                        help="Presupuesto fijo que se gastará completo"
+                    )
+                with col_budget[1]:
                     st.metric(
                         "META Óptimo",
                         f"${result['invest_META_opt']:,.0f}",
-                        f"{result['invest_META_opt']/total_budget*100:.0f}%"
+                        f"{result['invest_META_opt']/total_budget*100:.0f}% del total"
                     )
-                with col2:
+                with col_budget[2]:
                     st.metric(
                         "GADS Óptimo",
                         f"${result['invest_GADS_opt']:,.0f}",
-                        f"{result['invest_GADS_opt']/total_budget*100:.0f}%"
-                    )
-                with col3:
-                    st.metric(
-                        "Revenue (USD)",
-                        f"${result['revenue_opt']:,.0f}",
-                        f"${result['delta_revenue']:+,.0f}"
-                    )
-                with col4:
-                    st.metric(
-                        "ROI",
-                        f"{result['roi_opt']*100:.1f}%",
-                        f"{result['delta_roi']*100:+.1f}pp"
-                    )
-                with col5:
-                    st.metric(
-                        "ROAS",
-                        f"{result['roas_opt']:.2f}x",
-                        f"{result['delta_roas']:+.2f}x"
+                        f"{result['invest_GADS_opt']/total_budget*100:.0f}% del total"
                     )
                 
-                # Segunda fila de métricas
+                st.markdown("### 📈 Resultados Esperados")
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.metric(
-                        "Transacciones",
+                        "Revenue Incremental (USD)",
+                        f"${result['revenue_opt']:,.0f}",
+                        f"${result['delta_revenue']:+,.0f} vs 50/50",
+                        help="Revenue generado SOLO por la inversión publicitaria (sin baseline). Delta = diferencia vs distribución 50/50"
+                    )
+                with col2:
+                    st.metric(
+                        "ROI",
+                        f"{result['roi_opt']*100:.1f}%",
+                        f"{result['delta_roi']*100:+.1f}pp vs 50/50",
+                        help="ROI calculado sobre transacciones incrementales. Delta = diferencia vs distribución 50/50"
+                    )
+                with col3:
+                    st.metric(
+                        "ROAS",
+                        f"{result['roas_opt']:.2f}x",
+                        f"{result['delta_roas']:+.2f}x vs 50/50",
+                        help="ROAS calculado sobre transacciones incrementales. Delta = diferencia vs distribución 50/50"
+                    )
+                
+                # Segunda fila de métricas
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric(
+                        "Trans Incrementales",
                         f"{result['trans_opt']:.0f}",
-                        f"{result['delta_trans']:+.0f}"
+                        f"{result['delta_trans']:+.0f} vs 50/50",
+                        help="Transacciones atribuidas a la inversión (sin baseline). Delta = diferencia vs distribución 50/50. Puede ser negativo si el óptimo prioriza profit sobre volumen."
                     )
                 with col2:
                     st.metric(
                         "Profit (USD)",
                         f"${result['profit_opt']:,.0f}",
-                        f"${result['delta_profit']:+,.0f}"
+                        f"${result['delta_profit']:+,.0f} vs 50/50",
+                        help="Revenue incremental - Inversión. Delta = diferencia vs distribución 50/50"
                     )
                 with col3:
                     cpa_opt = result['invest_total_opt'] / result['trans_opt'] if result['trans_opt'] > 0 else 0
@@ -738,6 +1147,237 @@ elif page == "💰 Optimizar Presupuesto":
                         f"${cpa_opt:.2f}",
                         f"vs ticket ${ticket_usd:.2f}"
                     )
+                with col4:
+                    st.metric(
+                        "Baseline (ref)",
+                        f"{result['baseline']:.0f}",
+                        help="Transacciones orgánicas (sin inversión) - Solo referencia"
+                    )
+                
+                # Explicación adicional si hay delta negativo en transacciones
+                if result['delta_trans'] < 0:
+                    st.warning(f"""
+                    ℹ️ **¿Por qué Trans Incrementales tiene delta negativo ({result['delta_trans']:.0f})?**
+                    
+                    - **Óptimo:** {result['trans_opt']:.0f} trans → ${result['profit_opt']:,.0f} profit
+                    - **50/50:** {result['trans_actual']:.0f} trans → ${result['profit_actual']:,.0f} profit
+                    
+                    El optimizer **prioriza profit sobre volumen**. La distribución 50/50 genera {abs(result['delta_trans']):.0f} transacciones más, 
+                    pero con ${abs(result['delta_profit']):,.0f} MENOS profit. El óptimo sacrifica {abs(result['delta_trans']):.0f} transacciones 
+                    para maximizar la rentabilidad.
+                    """)
+                
+                # ============================================================
+                # COMPARACIÓN ÓPTIMO VS 50/50
+                # ============================================================
+                
+                st.markdown("---")
+                st.subheader("⚖️ Comparación: Óptimo vs 50/50")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("### ✅ Distribución ÓPTIMA")
+                    st.markdown(f"""
+                    - **META:** ${result['invest_META_opt']:,.0f} ({result['invest_META_opt']/total_budget*100:.0f}%)
+                    - **GADS:** ${result['invest_GADS_opt']:,.0f} ({result['invest_GADS_opt']/total_budget*100:.0f}%)
+                    - **Transacciones:** {result['trans_opt']:.0f}
+                    - **Revenue:** ${result['revenue_opt']:,.0f}
+                    - **Profit:** ${result['profit_opt']:,.0f}
+                    - **ROI:** {result['roi_opt']*100:.1f}%
+                    - **ROAS:** {result['roas_opt']:.2f}x
+                    """)
+                
+                with col2:
+                    st.markdown("### 📊 Distribución 50/50")
+                    st.markdown(f"""
+                    - **META:** ${result['invest_META_actual']:,.0f} (50%)
+                    - **GADS:** ${result['invest_GADS_actual']:,.0f} (50%)
+                    - **Transacciones:** {result['trans_actual']:.0f}
+                    - **Revenue:** ${result['revenue_actual']:,.0f}
+                    - **Profit:** ${result['profit_actual']:,.0f}
+                    - **ROI:** {result['roi_actual']*100:.1f}%
+                    - **ROAS:** {result['roas_actual']:.2f}x
+                    """)
+                
+                # Tabla comparativa resumen
+                st.markdown("**📋 Resumen de diferencias:**")
+                comparison_summary = pd.DataFrame({
+                    'Métrica': ['Inversión META', 'Inversión GADS', 'Transacciones', 'Revenue', 'Profit', 'ROI', 'ROAS'],
+                    'Óptimo': [
+                        f"${result['invest_META_opt']:,.0f}",
+                        f"${result['invest_GADS_opt']:,.0f}",
+                        f"{result['trans_opt']:.0f}",
+                        f"${result['revenue_opt']:,.0f}",
+                        f"${result['profit_opt']:,.0f}",
+                        f"{result['roi_opt']*100:.1f}%",
+                        f"{result['roas_opt']:.2f}x"
+                    ],
+                    '50/50': [
+                        f"${result['invest_META_actual']:,.0f}",
+                        f"${result['invest_GADS_actual']:,.0f}",
+                        f"{result['trans_actual']:.0f}",
+                        f"${result['revenue_actual']:,.0f}",
+                        f"${result['profit_actual']:,.0f}",
+                        f"{result['roi_actual']*100:.1f}%",
+                        f"{result['roas_actual']:.2f}x"
+                    ],
+                    'Diferencia': [
+                        f"${result['invest_META_opt'] - result['invest_META_actual']:+,.0f}",
+                        f"${result['invest_GADS_opt'] - result['invest_GADS_actual']:+,.0f}",
+                        f"{result['delta_trans']:+.0f}",
+                        f"${result['delta_revenue']:+,.0f}",
+                        f"${result['delta_profit']:+,.0f}",
+                        f"{result['delta_roi']*100:+.1f}pp",
+                        f"{result['delta_roas']:+.2f}x"
+                    ]
+                })
+                st.dataframe(comparison_summary, use_container_width=True, hide_index=True)
+                
+                # ============================================================
+                # RESULTADOS DESGLOSADOS POR CANAL
+                # ============================================================
+                
+                st.markdown("---")
+                st.subheader("📊 Resultados DESGLOSADOS por Canal (Óptimo)")
+                
+                st.markdown("**Análisis individual de cada canal** (META vs GADS):")
+                
+                # Tabla comparativa
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("### 🔵 META")
+                    
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.metric(
+                            "Inversión META",
+                            f"${result['invest_META_opt']:,.0f}"
+                        )
+                    with col_b:
+                        st.metric(
+                            "Trans Incrementales",
+                            f"{result['trans_META_opt']:.0f}"
+                        )
+                    
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.metric(
+                            "Revenue Incremental",
+                            f"${result['revenue_META_opt']:,.0f}"
+                        )
+                    with col_b:
+                        cpa_meta = result['invest_META_opt'] / result['trans_META_opt'] if result['trans_META_opt'] > 0 else 0
+                        st.metric(
+                            "CPA META",
+                            f"${cpa_meta:.2f}"
+                        )
+                    
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.metric(
+                            "ROI META",
+                            f"{result['roi_META_opt']*100:.1f}%",
+                            delta=None
+                        )
+                    with col_b:
+                        st.metric(
+                            "ROAS META",
+                            f"{result['roas_META_opt']:.2f}x",
+                            delta=None
+                        )
+                
+                with col2:
+                    st.markdown("### 🔴 GADS")
+                    
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.metric(
+                            "Inversión GADS",
+                            f"${result['invest_GADS_opt']:,.0f}"
+                        )
+                    with col_b:
+                        st.metric(
+                            "Trans Incrementales",
+                            f"{result['trans_GADS_opt']:.0f}"
+                        )
+                    
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.metric(
+                            "Revenue Incremental",
+                            f"${result['revenue_GADS_opt']:,.0f}"
+                        )
+                    with col_b:
+                        cpa_gads = result['invest_GADS_opt'] / result['trans_GADS_opt'] if result['trans_GADS_opt'] > 0 else 0
+                        st.metric(
+                            "CPA GADS",
+                            f"${cpa_gads:.2f}"
+                        )
+                    
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.metric(
+                            "ROI GADS",
+                            f"{result['roi_GADS_opt']*100:.1f}%",
+                            delta=None
+                        )
+                    with col_b:
+                        st.metric(
+                            "ROAS GADS",
+                            f"{result['roas_GADS_opt']:.2f}x",
+                            delta=None
+                        )
+                
+                # Comparación visual
+                st.markdown("---")
+                st.markdown("**🎯 Comparación de Eficiencia por Canal:**")
+                
+                # Tabla comparativa
+                comparison_df = pd.DataFrame({
+                    'Métrica': ['Inversión (USD)', 'Trans Incrementales', 'Revenue (USD)', 'CPA (USD)', 'ROI (%)', 'ROAS (x)'],
+                    'META': [
+                        f"${result['invest_META_opt']:,.0f}",
+                        f"{result['trans_META_opt']:.0f}",
+                        f"${result['revenue_META_opt']:,.0f}",
+                        f"${cpa_meta:.2f}",
+                        f"{result['roi_META_opt']*100:.1f}%",
+                        f"{result['roas_META_opt']:.2f}x"
+                    ],
+                    'GADS': [
+                        f"${result['invest_GADS_opt']:,.0f}",
+                        f"{result['trans_GADS_opt']:.0f}",
+                        f"${result['revenue_GADS_opt']:,.0f}",
+                        f"${cpa_gads:.2f}",
+                        f"{result['roi_GADS_opt']*100:.1f}%",
+                        f"{result['roas_GADS_opt']:.2f}x"
+                    ],
+                    'Total': [
+                        f"${result['invest_total_opt']:,.0f}",
+                        f"{result['trans_opt']:.0f}",
+                        f"${result['revenue_opt']:,.0f}",
+                        f"${cpa_opt:.2f}",
+                        f"{result['roi_opt']*100:.1f}%",
+                        f"{result['roas_opt']:.2f}x"
+                    ]
+                })
+                
+                st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+                
+                # Análisis de qué canal es mejor
+                if result['roi_META_opt'] > result['roi_GADS_opt']:
+                    mejor_canal = "META"
+                    diff_roi = (result['roi_META_opt'] - result['roi_GADS_opt']) * 100
+                    st.success(f"✅ **META** es más eficiente: ROI {diff_roi:+.1f}pp mayor que GADS")
+                elif result['roi_GADS_opt'] > result['roi_META_opt']:
+                    mejor_canal = "GADS"
+                    diff_roi = (result['roi_GADS_opt'] - result['roi_META_opt']) * 100
+                    st.success(f"✅ **GADS** es más eficiente: ROI {diff_roi:+.1f}pp mayor que META")
+                else:
+                    st.info("ℹ️ Ambos canales tienen ROI similar")
+                
+                st.markdown("---")
                 
                 # ============================================================
                 # VALIDACIONES DE CONFIABILIDAD
@@ -800,11 +1440,13 @@ elif page == "💰 Optimizar Presupuesto":
                     is_reliable = False
                 
                 if cpa_opt > 0 and cpa_opt < ticket_usd * cpa_min_ratio:
-                    warnings.append(f"🚨 CPA = ${cpa_opt:.2f} es muy bajo comparado con ticket ${ticket_usd:.2f} (< {cpa_min_ratio*100:.0f}%)")
+                    cpa_ratio_pct = cpa_min_ratio * 100
+                    warnings.append(f"🚨 CPA = ${cpa_opt:.2f} es muy bajo comparado con ticket ${ticket_usd:.2f} (menos del {cpa_ratio_pct:.0f}%)")
                     is_reliable = False
                 
                 if result['invest_total_opt'] < total_budget * invest_min_ratio:
-                    warnings.append(f"🚨 Inversión recomendada (${result['invest_total_opt']:,.0f}) es muy baja vs presupuesto (${total_budget:,.0f}) (< {invest_min_ratio*100:.0f}%)")
+                    invest_ratio_pct = invest_min_ratio * 100
+                    warnings.append(f"🚨 Inversión recomendada (${result['invest_total_opt']:,.0f}) es muy baja vs presupuesto (${total_budget:,.0f}) (menos del {invest_ratio_pct:.0f}%)")
                     is_reliable = False
                 
                 # Mostrar alertas si hay problemas
@@ -908,47 +1550,77 @@ elif page == "💰 Optimizar Presupuesto":
                     st.plotly_chart(fig4, use_container_width=True)
                 
                 # Recomendación
-                st.subheader("💡 Recomendación")
+                st.subheader("💡 Recomendación Final")
                 
                 profit_color = "green" if result['profit_opt'] > 0 else "red"
+                
+                # Formatear valores para evitar problemas de rendering
+                meta_pct = result['invest_META_opt']/total_budget*100
+                gads_pct = result['invest_GADS_opt']/total_budget*100
                 
                 st.markdown(f"""
                 **Para {selected_client}:**
                 
-                - **Presupuesto total:** ${total_budget:,.0f} USD
-                - **Distribución óptima:** ${result['invest_META_opt']:,.0f} META ({result['invest_META_opt']/total_budget*100:.0f}%) + ${result['invest_GADS_opt']:,.0f} GADS ({result['invest_GADS_opt']/total_budget*100:.0f}%)
-                - **Revenue esperado:** ${result['revenue_opt']:,.0f} USD ({result['trans_opt']:.0f} trans × ${ticket_usd:.2f})
-                - **Profit esperado:** <span style="color:{profit_color}">**${result['profit_opt']:,.0f} USD**</span>
+                - **Presupuesto total:** ${total_budget:,.0f} USD/semana
+                - **Distribución óptima:** ${result['invest_META_opt']:,.0f} META ({meta_pct:.0f}%) + ${result['invest_GADS_opt']:,.0f} GADS ({gads_pct:.0f}%)
+                
+                **Resultados esperados (INCREMENTALES):**
+                - **Transacciones incrementales:** {result['trans_opt']:.0f} ({result['trans_META_opt']:.0f} META + {result['trans_GADS_opt']:.0f} GADS)
+                - **Revenue incremental:** ${result['revenue_opt']:,.0f} USD (calculado: {result['trans_opt']:.0f} trans × ${ticket_usd:.2f} ticket)
+                - **Profit:** <span style="color:{profit_color}">**${result['profit_opt']:,.0f} USD**</span>
                 - **ROI:** {result['roi_opt']*100:.1f}% | **ROAS:** {result['roas_opt']:.2f}x
-                - **Mejora vs 50/50:** +{result['delta_profit']:,.0f} USD profit ({result['delta_roi']*100:+.1f}pp ROI)
+                - **Mejora vs 50/50:** +${result['delta_profit']:,.0f} profit ({result['delta_roi']*100:+.1f}pp ROI)
+                
+                **Contexto:**
+                - Baseline orgánico: {result['baseline']:.0f} trans/semana (sin inversión)
+                - Transacciones totales estimadas: {result['baseline'] + result['trans_opt']:.0f} (baseline + incremental)
                 
                 ✅ Modelo confiable: R² = {model['metrics']['r2_test']:.4f}
                 """, unsafe_allow_html=True)
                 
                 if result['profit_opt'] < 0:
                     st.warning(f"⚠️ **Profit negativo:** Con este presupuesto y ticket, se espera pérdida. Considera: 1) Reducir presupuesto, 2) Aumentar ticket promedio, 3) Mejorar eficiencia de campaña.")
+                else:
+                    # Recomendación de cuál canal priorizar
+                    ratio_meta_gads = result['invest_META_opt']/result['invest_GADS_opt'] if result['invest_GADS_opt'] > 0 else 0
+                    ratio_gads_meta = result['invest_GADS_opt']/result['invest_META_opt'] if result['invest_META_opt'] > 0 else 0
+                    roi_meta_pct = result['roi_META_opt']*100
+                    roi_gads_pct = result['roi_GADS_opt']*100
+                    
+                    if result['invest_META_opt'] > result['invest_GADS_opt'] * 1.5:
+                        st.success(f"💡 **Prioriza META**: El modelo recomienda invertir {ratio_meta_gads:.1f}x más en META que en GADS (ROI META: {roi_meta_pct:.1f}% vs GADS: {roi_gads_pct:.1f}%)")
+                    elif result['invest_GADS_opt'] > result['invest_META_opt'] * 1.5:
+                        st.success(f"💡 **Prioriza GADS**: El modelo recomienda invertir {ratio_gads_meta:.1f}x más en GADS que en META (ROI GADS: {roi_gads_pct:.1f}% vs META: {roi_meta_pct:.1f}%)")
+                    else:
+                        st.info("💡 **Distribución balanceada**: Ambos canales tienen eficiencia similar, se recomienda distribución equilibrada.")
 
 # =============================================================================
-# PÁGINA 4: ANÁLISIS DE SATURACIÓN
+# PÁGINA 4: ENCONTRAR PRESUPUESTO ÓPTIMO
 # =============================================================================
 
-elif page == "📉 Análisis de Saturación":
-    st.header("📉 Análisis de Saturación + Punto Óptimo de Inversión")
+elif page == "📉 Encontrar Presupuesto Óptimo":
+    st.header("📉 Encontrar Presupuesto Óptimo de Inversión")
     
     if model is None or df is None:
         st.error("❌ Faltan modelo o datos")
         st.stop()
     
     st.info("""
-    💡 **¿Qué es el Punto de Saturación?**
+    💡 **¿Para qué sirve esta sección?**
     
-    Es el nivel de inversión donde **invertir $1 adicional genera menos de $1 de revenue**. 
-    Más allá de este punto, el ROI marginal es negativo y **no conviene seguir invirtiendo**.
+    **Úsala cuando:** Tienes presupuesto FLEXIBLE y quieres saber **CUÁNTO deberías invertir** para maximizar profit.
     
-    Esta sección te muestra:
-    - Curvas de ROI y ROAS vs presupuesto
-    - Punto óptimo donde maximizas profit
-    - Presupuesto máximo recomendado
+    **Ejemplo:** "Tengo hasta $20,000 disponibles. ¿Cuánto debería invertir realmente?"
+    
+    **Lo que hace:**
+    - Busca el presupuesto óptimo que **maximiza profit** (puede ser MENOR que el disponible)
+    - Te muestra la **distribución META/GADS** de ese presupuesto óptimo (basada en curvas de respuesta)
+    - Genera curvas de saturación para visualizar cómo cambia el profit con diferentes presupuestos
+    - Te advierte si invertir más del óptimo generaría **pérdidas**
+    
+    **Punto de saturación:** Donde invertir $1 adicional genera menos de $1 de revenue → profit empieza a bajar.
+    
+    ⚠️ **Nota:** Si ya tienes un presupuesto APROBADO/FIJO, usa la sección "Distribuir Presupuesto Fijo".
     """)
     
     # Seleccionar cliente
@@ -976,7 +1648,7 @@ elif page == "📉 Análisis de Saturación":
             key='sat_max_budget'
         )
     
-    # Ejecutar análisis
+    # Ejecutar análisis (150 puntos = buena precisión)
     if st.button("🔍 Analizar Saturación", type="primary"):
         with st.spinner("Analizando curva de saturación..."):
             sat_analysis = analyze_saturation(
@@ -986,15 +1658,39 @@ elif page == "📉 Análisis de Saturación":
                 df,
                 curvas_hill,
                 max_budget=max_budget_analysis,
-                n_points=50
+                n_points=150
             )
             
             # Resultados principales
             st.success("✅ Análisis completado")
             
-            st.subheader("📊 Punto Óptimo de Inversión")
+            st.subheader("🎯 Presupuesto Óptimo Recomendado")
             
-            col1, col2, col3, col4 = st.columns(4)
+            st.info("""
+            💡 **¿Qué es el Presupuesto Óptimo?**
+            
+            Es el presupuesto semanal que **maximiza tu profit** (revenue - inversión). 
+            Invertir menos genera menos ganancia. Invertir más también genera menos ganancia.
+            """)
+            
+            # Obtener la distribución META/GADS del presupuesto óptimo
+            optimal_distribution = optimize_distribution_for_fixed_budget(
+                selected_client,
+                sat_analysis['optimal_budget'],
+                ticket_usd,
+                model,
+                df,
+                curvas_hill,
+                min_invest_meta=0,
+                min_invest_gads=0,
+                optimize_for='profit',
+                force_full_budget=False  # Permitir usar menos si es óptimo
+            )
+            
+            # Métricas principales en dos filas
+            st.markdown("#### 💰 Presupuesto y Distribución")
+            col1, col2, col3 = st.columns(3)
+            
             with col1:
                 st.metric(
                     "Presupuesto Óptimo",
@@ -1003,22 +1699,56 @@ elif page == "📉 Análisis de Saturación":
                 )
             with col2:
                 st.metric(
-                    "Profit Máximo",
-                    f"${sat_analysis['optimal_profit']:,.0f}",
-                    "USD"
+                    "META Óptimo",
+                    f"${optimal_distribution['invest_META']:,.0f}",
+                    f"{optimal_distribution['invest_META']/sat_analysis['optimal_budget']*100:.0f}% del óptimo"
                 )
             with col3:
                 st.metric(
-                    "ROI Óptimo",
-                    f"{sat_analysis['optimal_roi']*100:.1f}%",
-                    "percent"
+                    "GADS Óptimo",
+                    f"${optimal_distribution['invest_GADS']:,.0f}",
+                    f"{optimal_distribution['invest_GADS']/sat_analysis['optimal_budget']*100:.0f}% del óptimo"
+                )
+            
+            st.markdown("#### 📈 Resultados Esperados")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    "Profit Máximo",
+                    f"${sat_analysis['optimal_profit']:,.0f}",
+                    "USD/semana"
+                )
+            with col2:
+                st.metric(
+                    "Transacciones",
+                    f"{optimal_distribution['trans']:.0f}",
+                    "incrementales"
+                )
+            with col3:
+                st.metric(
+                    "ROI",
+                    f"{sat_analysis['optimal_roi']*100:.1f}%"
                 )
             with col4:
                 st.metric(
-                    "ROAS Óptimo",
-                    f"{sat_analysis['optimal_roas']:.2f}x",
-                    "times"
+                    "ROAS",
+                    f"{sat_analysis['optimal_roas']:.2f}x"
                 )
+            
+            st.success(f"""
+            ✅ **Recomendación:** Invertir **${sat_analysis['optimal_budget']:,.0f} USD/semana** en medios pagos.
+            
+            **Distribución óptima (basada en curvas de respuesta):**
+            - **META:** ${optimal_distribution['invest_META']:,.0f} ({optimal_distribution['invest_META']/sat_analysis['optimal_budget']*100:.0f}%) → {optimal_distribution['trans_META']:.0f} transacciones
+            - **GADS:** ${optimal_distribution['invest_GADS']:,.0f} ({optimal_distribution['invest_GADS']/sat_analysis['optimal_budget']*100:.0f}%) → {optimal_distribution['trans_GADS']:.0f} transacciones
+            
+            **Resultados esperados (incrementales):**
+            - {optimal_distribution['trans']:.0f} transacciones/semana atribuidas a la inversión
+            - ${sat_analysis['optimal_profit']:,.0f} USD de profit neto
+            - ROI de {sat_analysis['optimal_roi']*100:.0f}%
+            - ROAS de {sat_analysis['optimal_roas']:.2f}x (cada $1 invertido genera ${sat_analysis['optimal_roas']:.2f} de revenue)
+            """)
             
             # ============================================================
             # VALIDACIONES DE CONFIABILIDAD
@@ -1095,6 +1825,11 @@ elif page == "📉 Análisis de Saturación":
             # Gráfico 1: Profit vs Presupuesto
             st.subheader("📈 Curva de Profit vs Presupuesto")
             
+            st.markdown("""
+            Este gráfico muestra cómo varía el **profit** según el presupuesto invertido.
+            El punto óptimo (⭐) indica dónde maximizas tus ganancias.
+            """)
+            
             fig1 = go.Figure()
             
             fig1.add_trace(go.Scatter(
@@ -1102,36 +1837,65 @@ elif page == "📉 Análisis de Saturación":
                 y=sat_analysis['profits'],
                 mode='lines',
                 name='Profit',
-                line=dict(color='#2ecc71', width=3)
+                line=dict(color='#2ecc71', width=3),
+                hovertemplate='Presupuesto: $%{x:,.0f}<br>Profit: $%{y:,.0f}<extra></extra>'
             ))
             
-            # Marcar punto óptimo
+            # Marcar punto ÓPTIMO (máximo profit)
             fig1.add_trace(go.Scatter(
                 x=[sat_analysis['optimal_budget']],
                 y=[sat_analysis['optimal_profit']],
                 mode='markers+text',
-                name='Punto Óptimo',
-                marker=dict(size=15, color='red', symbol='star'),
-                text=[f"${sat_analysis['optimal_budget']:,.0f}"],
-                textposition='top center'
+                name='Presupuesto Óptimo',
+                marker=dict(size=20, color='gold', symbol='star', 
+                           line=dict(color='darkgreen', width=2)),
+                text=[f"ÓPTIMO<br>${sat_analysis['optimal_budget']:,.0f}"],
+                textposition='top center',
+                textfont=dict(size=12, color='darkgreen', family='Arial Black'),
+                hovertemplate='<b>PRESUPUESTO ÓPTIMO</b><br>Presupuesto: $%{x:,.0f}<br>Profit: $%{y:,.0f}<extra></extra>'
             ))
             
-            # Línea en profit = 0
-            fig1.add_hline(y=0, line_dash="dash", line_color="gray", 
-                          annotation_text="Break-even")
+            # Línea en profit = 0 (break-even)
+            fig1.add_hline(y=0, line_dash="dash", line_color="gray", line_width=1,
+                          annotation_text="Break-even (profit = 0)", annotation_position="right")
+            
+            # Área positiva (profit > 0)
+            positive_profits = sat_analysis['profits'].copy()
+            positive_profits[positive_profits < 0] = 0
+            fig1.add_trace(go.Scatter(
+                x=sat_analysis['budgets'],
+                y=positive_profits,
+                fill='tozeroy',
+                fillcolor='rgba(46, 204, 113, 0.2)',
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo='skip'
+            ))
             
             fig1.update_layout(
                 title=f"Profit vs Presupuesto - {selected_client}",
                 xaxis_title="Presupuesto Semanal (USD)",
                 yaxis_title="Profit (USD)",
                 hovermode='x unified',
-                height=500
+                height=500,
+                showlegend=False
             )
             
             st.plotly_chart(fig1, use_container_width=True)
             
+            st.info(f"""
+            📊 **Interpretación del gráfico:**
+            - **Antes de ${sat_analysis['optimal_budget']:,.0f}:** El profit crece → Conviene invertir más
+            - **En ${sat_analysis['optimal_budget']:,.0f} (⭐):** Profit máximo → **Punto ideal**
+            - **Después de ${sat_analysis['optimal_budget']:,.0f}:** El profit baja → Estás desperdiciando presupuesto
+            """)
+            
             # Gráfico 2: ROI y ROAS vs Presupuesto
             st.subheader("📊 ROI y ROAS vs Presupuesto")
+            
+            st.markdown("""
+            Este gráfico muestra cómo **decrecen** el ROI y ROAS a medida que aumentas la inversión (efecto de saturación).
+            """)
             
             fig2 = go.Figure()
             
@@ -1141,7 +1905,8 @@ elif page == "📉 Análisis de Saturación":
                 mode='lines',
                 name='ROI (%)',
                 line=dict(color='#3498db', width=3),
-                yaxis='y'
+                yaxis='y',
+                hovertemplate='Presupuesto: $%{x:,.0f}<br>ROI: %{y:.1f}%<extra></extra>'
             ))
             
             fig2.add_trace(go.Scatter(
@@ -1150,13 +1915,16 @@ elif page == "📉 Análisis de Saturación":
                 mode='lines',
                 name='ROAS (x)',
                 line=dict(color='#e74c3c', width=3),
-                yaxis='y2'
+                yaxis='y2',
+                hovertemplate='Presupuesto: $%{x:,.0f}<br>ROAS: %{y:.2f}x<extra></extra>'
             ))
             
-            # Marcar punto óptimo
+            # Marcar punto ÓPTIMO
             fig2.add_vline(x=sat_analysis['optimal_budget'], 
-                          line_dash="dash", line_color="red",
-                          annotation_text=f"Óptimo: ${sat_analysis['optimal_budget']:,.0f}")
+                          line_dash="dash", line_color="darkgreen", line_width=3,
+                          annotation_text=f"⭐ Óptimo: ${sat_analysis['optimal_budget']:,.0f}",
+                          annotation_position="top",
+                          annotation_font=dict(size=12, color='darkgreen'))
             
             fig2.update_layout(
                 title=f"ROI y ROAS vs Presupuesto - {selected_client}",
@@ -1170,68 +1938,127 @@ elif page == "📉 Análisis de Saturación":
             
             st.plotly_chart(fig2, use_container_width=True)
             
-            # Gráfico 3: ROI Marginal
-            st.subheader("🎯 ROI Marginal (Derivada del Profit)")
+            st.info("""
+            📊 **Observa:** ROI y ROAS **siempre decrecen** al aumentar la inversión (ley de rendimientos decrecientes).
+            Aunque el profit puede seguir creciendo por un tiempo, eventualmente también baja.
+            """)
             
-            fig3 = go.Figure()
+            # Gráfico 3: ROI Marginal (Avanzado - colapsable)
+            with st.expander("🔬 Ver Gráfico Avanzado: ROI Marginal"):
+                st.markdown("""
+                **ROI Marginal** = Cuánto profit adicional genera cada dólar extra invertido.
+                
+                Este es un análisis más técnico. Si no estás familiarizado con derivadas, puedes ignorarlo.
+                """)
+                
+                st.info("""
+                💡 **Interpretación:**
+                - ROI marginal > 0: Cada $1 adicional aún genera profit ✅
+                - ROI marginal = 0: Has alcanzado el máximo profit (punto óptimo) ⭐
+                - ROI marginal < 0: Cada $1 adicional reduce tu profit ❌
+                """)
+                
+                fig3 = go.Figure()
+                
+                fig3.add_trace(go.Scatter(
+                    x=sat_analysis['budgets'],
+                    y=sat_analysis['marginal_roi'],
+                    mode='lines',
+                    name='ROI Marginal',
+                    line=dict(color='#9b59b6', width=3),
+                    fill='tozeroy',
+                    fillcolor='rgba(155, 89, 182, 0.3)',
+                    hovertemplate='Presupuesto: $%{x:,.0f}<br>ROI Marginal: %{y:.2f}<extra></extra>'
+                ))
+                
+                # Línea en ROI marginal = 0
+                fig3.add_hline(y=0, line_dash="solid", line_color="red", line_width=1,
+                              annotation_text="ROI Marginal = 0", annotation_position="right")
+                
+                # Marcar punto ÓPTIMO
+                fig3.add_vline(x=sat_analysis['optimal_budget'], 
+                              line_dash="dash", line_color="darkgreen", line_width=3,
+                              annotation_text=f"⭐ Óptimo: ${sat_analysis['optimal_budget']:,.0f}",
+                              annotation_position="top",
+                              annotation_font=dict(size=12, color='darkgreen'))
+                
+                fig3.update_layout(
+                    title=f"ROI Marginal vs Presupuesto - {selected_client}",
+                    xaxis_title="Presupuesto Semanal (USD)",
+                    yaxis_title="ROI Marginal = d(Profit) / d(Presupuesto)",
+                    hovermode='x unified',
+                    height=500
+                )
+                
+                st.plotly_chart(fig3, use_container_width=True)
+                
+                st.markdown(f"""
+                📊 **Observa en el gráfico:**
+                - El ROI marginal es **positivo** antes de ${sat_analysis['optimal_budget']:,.0f} (zona verde)
+                - Se cruza con **0** aproximadamente en ${sat_analysis['optimal_budget']:,.0f} (punto óptimo)
+                - Se vuelve **negativo** después (zona roja = desperdicio)
+                """)
             
-            fig3.add_trace(go.Scatter(
-                x=sat_analysis['budgets'],
-                y=sat_analysis['marginal_roi'],
-                mode='lines',
-                name='ROI Marginal',
-                line=dict(color='#9b59b6', width=3),
-                fill='tozeroy'
-            ))
-            
-            # Línea en ROI marginal = 0
-            fig3.add_hline(y=0, line_dash="dash", line_color="red", 
-                          annotation_text="ROI Marginal = 0 (no conviene invertir más)")
-            
-            # Marcar punto óptimo
-            fig3.add_vline(x=sat_analysis['optimal_budget'], 
-                          line_dash="dash", line_color="green",
-                          annotation_text=f"Óptimo: ${sat_analysis['optimal_budget']:,.0f}")
-            
-            fig3.update_layout(
-                title=f"ROI Marginal vs Presupuesto - {selected_client}",
-                xaxis_title="Presupuesto Semanal (USD)",
-                yaxis_title="ROI Marginal (d(Profit)/d(Budget))",
-                hovermode='x unified',
-                height=500
-            )
-            
-            st.plotly_chart(fig3, use_container_width=True)
-            
-            # Recomendaciones
-            st.subheader("💡 Recomendaciones")
+            # Recomendaciones Finales
+            st.markdown("---")
+            st.subheader("🎯 Resumen y Recomendación Final")
             
             # Encontrar presupuesto donde profit = 0 (break-even)
             break_even_idx = np.argmin(np.abs(sat_analysis['profits']))
             break_even_budget = sat_analysis['budgets'][break_even_idx]
             
-            st.markdown(f"""
-            **Análisis de Saturación para {selected_client}:**
+            # Formatear valores
+            optimal_budget_val = sat_analysis['optimal_budget']
+            optimal_profit_val = sat_analysis['optimal_profit']
+            optimal_roi_val = sat_analysis['optimal_roi'] * 100
+            optimal_roas_val = sat_analysis['optimal_roas']
             
-            1. **Presupuesto Óptimo:** ${sat_analysis['optimal_budget']:,.0f} USD/semana
-               - Este presupuesto maximiza el profit absoluto
-               - Profit esperado: ${sat_analysis['optimal_profit']:,.0f} USD
-               - ROI: {sat_analysis['optimal_roi']*100:.1f}% | ROAS: {sat_analysis['optimal_roas']:.2f}x
+            # Rangos de presupuesto
+            col1, col2, col3 = st.columns(3)
             
-            2. **Break-even:** ~${break_even_budget:,.0f} USD/semana
-               - Por debajo de este presupuesto, hay pérdida neta
-               - Por encima, comienza a generar profit
+            with col1:
+                st.markdown("### 📉 Mínimo")
+                st.metric("Break-even", f"${break_even_budget:,.0f}")
+                st.caption("Límite inferior (profit = 0)")
             
-            3. **Punto de Saturación:** Cuando ROI marginal ≈ 0
-               - Más allá de ${sat_analysis['optimal_budget']:,.0f}, cada $1 adicional genera <$1 de revenue
-               - **No se recomienda invertir más** que este monto
+            with col2:
+                st.markdown("### ⭐ ÓPTIMO")
+                st.metric("Recomendado", f"${optimal_budget_val:,.0f}")
+                st.caption(f"Profit máximo: ${optimal_profit_val:,.0f}")
             
-            4. **Recomendación Final:**
-               - **Presupuesto mínimo:** ${break_even_budget:,.0f} USD (para no perder dinero)
-               - **Presupuesto óptimo:** ${sat_analysis['optimal_budget']:,.0f} USD (maximiza profit)
-               - **Presupuesto máximo:** ${sat_analysis['optimal_budget']*1.2:,.0f} USD (límite conservador)
+            with col3:
+                st.markdown("### 📈 Máximo")
+                conservador = optimal_budget_val * 1.2
+                st.metric("Límite conservador", f"${conservador:,.0f}")
+                st.caption("+20% del óptimo")
             
-            ✅ Ticket promedio usado: ${ticket_usd:.2f} USD
+            st.success(f"""
+            ### ✅ Recomendación para {selected_client}:
+            
+            **Invertir ${optimal_budget_val:,.0f} USD/semana** en medios pagos (META + GADS).
+            
+            **Resultados esperados con este presupuesto:**
+            - 💰 Profit semanal: ${optimal_profit_val:,.0f} USD
+            - 📊 ROI: {optimal_roi_val:.1f}%
+            - 🎯 ROAS: {optimal_roas_val:.2f}x (cada $1 invertido genera ${optimal_roas_val:.2f} de revenue)
+            - 🛒 Transacciones incrementales: ~{optimal_distribution['trans']:.0f}/semana
+            
+            **Guías de presupuesto:**
+            - ⚠️ **Menos de ${break_even_budget:,.0f} USD:** Pierdes dinero
+            - ✅ **${break_even_budget:,.0f} - ${optimal_budget_val:,.0f} USD:** Profit crece (zona óptima)
+            - ⭐ **${optimal_budget_val:,.0f} USD:** Máximo profit posible
+            - 📉 **Más de ${optimal_budget_val:,.0f} USD:** Profit empieza a decrecer
+            - ❌ **Más de ${conservador:,.0f} USD:** Desperdicio significativo de presupuesto
+            """)
+            
+            st.info(f"""
+            **Datos técnicos del análisis:**
+            - ✅ Ticket promedio: ${ticket_usd:.2f} USD
+            - ✅ Transacciones: Solo **incrementales** (sin baseline orgánico)
+            - ✅ Rango analizado: $0 - ${max_budget_analysis:,.0f} USD
+            - ✅ Búsqueda óptimo: Grid search $50 + refinamiento $10 (determinístico)
+            - ✅ Curva saturación: 150 puntos usando SLSQP (optimizador gradient-based)
+            - ✅ Distribución META/GADS: Basada en curvas de respuesta Hill
             """)
             
             if sat_analysis['optimal_profit'] < 0:
@@ -1334,18 +2161,31 @@ st.sidebar.info("""
 
 1. **Datos**: Visualiza datos por cliente + ticket USD
 2. **Modelo Pooled**: Ve métricas del modelo (R² = 0.90)
-3. **Optimizar**: Calcula mix óptimo maximizando ROI/ROAS
-4. **Saturación**: Encuentra punto óptimo de inversión
+3. **Distribuir Presupuesto Fijo**: "Tengo $X aprobado, ¿cómo lo distribuyo?"
+4. **Encontrar Presupuesto Óptimo**: "¿Cuánto DEBERÍA invertir?"
 5. **Dashboard**: Compara todos los clientes
 
-**💰 Nuevas funcionalidades:**
-- ✅ Análisis de ROAS y ROI
-- ✅ Ticket promedio en USD (editable)
-- ✅ Punto de saturación óptimo
-- ✅ Recomendaciones de presupuesto máximo
+**💡 ¿Cuál sección usar?**
+
+📌 **¿Presupuesto YA APROBADO?** → Sección 3
+   - Ejemplo: "Tengo $5,000 aprobados"
+   - Optimiza: Distribución META/GADS
+   - Gasta TODO el presupuesto
+
+📌 **¿Presupuesto FLEXIBLE?** → Sección 4
+   - Ejemplo: "Tengo hasta $20,000"
+   - Optimiza: Monto total + distribución
+   - Puede recomendar gastar MENOS
+
+**✨ Funcionalidades:**
+- ✅ Basado en curvas de respuesta Hill
+- ✅ Transacciones INCREMENTALES
+- ✅ Resultados por canal (META/GADS)
+- ✅ Análisis de saturación
+- ✅ Validaciones de confiabilidad
 
 **📊 R² Test**: """ + (f"{model['metrics']['r2_test']:.4f}" if model else "No cargado") + """
 """)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("v3.0 - Optimizer con ROAS/ROI + Análisis de Saturación")
+st.sidebar.caption("v5.0.0 - Reestructuración: Dos secciones claras (Distribuir Fijo vs Encontrar Óptimo). Distribución basada en curvas de respuesta.")

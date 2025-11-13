@@ -804,13 +804,13 @@ elif page == "💰 Distribuir Presupuesto Fijo":
             if curva["META"] or curva["GADS"]:
                 fig = go.Figure()
                 
-                # Calcular rango dinámico: hasta 3x el punto de saturación (k) más alto
+                # Calcular rango dinámico: hasta 8x el punto de saturación (k) más alto
                 k_meta = curva["META"]["k"] if curva["META"] else 0
                 k_gads = curva["GADS"]["k"] if curva["GADS"] else 0
                 max_k = max(k_meta, k_gads)
                 
-                # Rango hasta 3x el punto de saturación más alto
-                max_invest = max(max_k * 3, 1000)  # Mínimo $1,000 para visualización
+                # Rango hasta 8x el punto de saturación más alto (permite ver cerca del máximo β)
+                max_invest = max(max_k * 8, 1000)  # Mínimo $1,000 para visualización
                 x_range = np.linspace(0, max_invest, 200)
                 
                 if curva["META"]:
@@ -861,9 +861,10 @@ elif page == "💰 Distribuir Presupuesto Fijo":
                 st.plotly_chart(fig, use_container_width=True)
                 
                 st.info(f"""
-                💡 **Rango del gráfico:** $0 - ${max_invest:,.0f} (3x el punto de saturación más alto)
+                💡 **Rango del gráfico:** $0 - ${max_invest:,.0f} (8x el punto de saturación más alto)
                 
-                El punto **k** marca donde cada curva alcanza ~63% de su máximo (inicio de saturación fuerte).
+                El punto **k** marca donde cada curva alcanza el **50%** de su máximo β (punto de inflexión).
+                A partir de ~3k empieza la saturación fuerte, y el máximo β se alcanza asintóticamente.
                 """)
     
     # Definir presupuesto
@@ -969,6 +970,45 @@ elif page == "💰 Distribuir Presupuesto Fijo":
             
             if result:
                 st.success("✅ Optimización completada")
+                
+                # ============================================================
+                # VALIDACIÓN: R² de curvas Hill (INMEDIATAMENTE DESPUÉS DEL BOTÓN)
+                # ============================================================
+                
+                warnings = []
+                if curvas_hill and selected_client in curvas_hill:
+                    curva = curvas_hill[selected_client]
+                    r2_meta = curva["META"]["r2"] if curva["META"] else None
+                    r2_gads = curva["GADS"]["r2"] if curva["GADS"] else None
+                    
+                    if r2_meta and r2_meta < 0.70:
+                        warnings.append(f"⚠️ R² curva META = {r2_meta:.3f} (< 0.70) - Curva NO confiable")
+                    
+                    if r2_gads and r2_gads < 0.70:
+                        warnings.append(f"⚠️ R² curva GADS = {r2_gads:.3f} (< 0.70) - Curva NO confiable")
+                    
+                    if not curva["META"] and not curva["GADS"]:
+                        warnings.append(f"❌ No hay curvas Hill para {selected_client}")
+                
+                if warnings:
+                    st.warning("⚠️ **ADVERTENCIA: Curvas de respuesta con baja confiabilidad**")
+                    for warning in warnings:
+                        st.markdown(f"- {warning}")
+                    st.info("""
+                    **¿Qué significa esto?**
+                    - Las curvas Hill de este cliente no ajustan bien los datos históricos (R² < 0.70)
+                    - Las predicciones pueden no ser precisas
+                    
+                    **¿Qué hacer?**
+                    - ✅ Usa el modelo pooled (R² = 0.90) como referencia general
+                    - ✅ Revisa datos históricos en pestaña "Datos"
+                    - ✅ Espera más observaciones para mejorar el ajuste
+                    - ⚠️ Toma estas cifras con precaución
+                    """)
+                else:
+                    st.success("✅ Curvas de respuesta confiables (R² > 0.70)")
+                
+                st.markdown("---")
                 
                 # ============================================================
                 # VALIDACIÓN ESPECIAL: INVERSIÓN = 0 (ANTES DE MOSTRAR MÉTRICAS)
@@ -1379,116 +1419,6 @@ elif page == "💰 Distribuir Presupuesto Fijo":
                 
                 st.markdown("---")
                 
-                # ============================================================
-                # VALIDACIONES DE CONFIABILIDAD
-                # ============================================================
-                
-                warnings = []
-                is_reliable = True
-                
-                # 1. Verificar R² de curvas Hill
-                if curvas_hill and selected_client in curvas_hill:
-                    curva = curvas_hill[selected_client]
-                    
-                    r2_meta = curva["META"]["r2"] if curva["META"] else None
-                    r2_gads = curva["GADS"]["r2"] if curva["GADS"] else None
-                    
-                    if r2_meta and r2_meta < 0.70:
-                        warnings.append(f"⚠️ R² curva META = {r2_meta:.3f} (< 0.70) - Curva NO confiable")
-                        is_reliable = False
-                    
-                    if r2_gads and r2_gads < 0.70:
-                        warnings.append(f"⚠️ R² curva GADS = {r2_gads:.3f} (< 0.70) - Curva NO confiable")
-                        is_reliable = False
-                    
-                    if not curva["META"] and not curva["GADS"]:
-                        warnings.append(f"❌ No hay curvas Hill para {selected_client}")
-                        is_reliable = False
-                
-                # 2. Sanity checks (solo si R² es bajo o valores extremos)
-                # Si R² de curvas es bueno (> 0.70), confiar más en los resultados
-                r2_meta_val = None
-                r2_gads_val = None
-                if curvas_hill and selected_client in curvas_hill:
-                    curva = curvas_hill[selected_client]
-                    r2_meta_val = curva["META"]["r2"] if curva["META"] else None
-                    r2_gads_val = curva["GADS"]["r2"] if curva["GADS"] else None
-                
-                # Si ambas curvas tienen R² alto, permitir métricas más agresivas
-                has_good_curves = (r2_meta_val and r2_meta_val > 0.70) or (r2_gads_val and r2_gads_val > 0.70)
-                
-                # Umbrales ajustados según calidad de curvas
-                if has_good_curves:
-                    # Con curvas buenas, umbrales más relajados (marketing digital puede ser muy eficiente)
-                    roi_threshold = 50.0  # 5000% (50x)
-                    roas_threshold = 100.0  # 100x
-                    cpa_min_ratio = 0.05  # 5% del ticket
-                    invest_min_ratio = 0.02  # 2% del presupuesto
-                else:
-                    # Con curvas malas, umbrales más estrictos
-                    roi_threshold = 5.0  # 500%
-                    roas_threshold = 10.0  # 10x
-                    cpa_min_ratio = 0.2  # 20% del ticket
-                    invest_min_ratio = 0.1  # 10% del presupuesto
-                
-                if result['roi_opt'] > roi_threshold:
-                    warnings.append(f"🚨 ROI = {result['roi_opt']*100:.0f}% es extremadamente alto (> {roi_threshold*100:.0f}%)")
-                    is_reliable = False
-                
-                if result['roas_opt'] > roas_threshold:
-                    warnings.append(f"🚨 ROAS = {result['roas_opt']:.1f}x es extremadamente alto (> {roas_threshold:.0f}x)")
-                    is_reliable = False
-                
-                if cpa_opt > 0 and cpa_opt < ticket_usd * cpa_min_ratio:
-                    cpa_ratio_pct = cpa_min_ratio * 100
-                    warnings.append(f"🚨 CPA = ${cpa_opt:.2f} es muy bajo comparado con ticket ${ticket_usd:.2f} (menos del {cpa_ratio_pct:.0f}%)")
-                    is_reliable = False
-                
-                if result['invest_total_opt'] < total_budget * invest_min_ratio:
-                    invest_ratio_pct = invest_min_ratio * 100
-                    warnings.append(f"🚨 Inversión recomendada (${result['invest_total_opt']:,.0f}) es muy baja vs presupuesto (${total_budget:,.0f}) (menos del {invest_ratio_pct:.0f}%)")
-                    is_reliable = False
-                
-                # Mostrar alertas si hay problemas
-                if warnings:
-                    st.error("⚠️ **RESULTADOS NO CONFIABLES**")
-                    st.warning("""
-                    **Los resultados NO son confiables debido a:**
-                    """)
-                    for warning in warnings:
-                        st.markdown(f"- {warning}")
-                    
-                    st.info(f"""
-                    **¿Por qué pasa esto?**
-                    
-                    - **R² bajo de curva Hill**: La curva no ajusta bien los datos históricos del cliente
-                    - **Pocos datos**: El cliente tiene pocas observaciones con inversión
-                    - **Alta variabilidad**: Los datos históricos son muy variables
-                    - **Valores extremos**: Las métricas superan umbrales realistas
-                    
-                    **¿Qué hacer?**
-                    
-                    1. ✅ **Usa el modelo pooled** (R² = 0.90) en lugar de curvas individuales
-                    2. ✅ **Revisa datos históricos** del cliente (pestaña "Datos")
-                    3. ✅ **Incrementa inversión gradualmente** para generar más datos
-                    4. ⚠️ **NO confíes en estos números** para tomar decisiones
-                    
-                    **Umbrales de confiabilidad:**
-                    - R² > 0.70 → Curva confiable
-                    - R² 0.50-0.70 → Usar con precaución
-                    - R² < 0.50 → NO usar
-                    
-                    **Umbrales de métricas** (aplicados según R²):
-                    - Con R² > 0.70: ROI < 5000%, ROAS < 100x (marketing digital eficiente)
-                    - Con R² < 0.70: ROI < 500%, ROAS < 10x (valores conservadores)
-                    """)
-                
-                # Indicador de confiabilidad
-                if is_reliable:
-                    st.success("✅ Resultados confiables - R² de curvas Hill > 0.70")
-                else:
-                    st.error(f"❌ Resultados NO confiables - Revisar alertas arriba")
-                
                 # Gráficos
                 col1, col2 = st.columns(2)
                 
@@ -1593,7 +1523,7 @@ elif page == "💰 Distribuir Presupuesto Fijo":
                         st.success(f"💡 **Prioriza GADS**: El modelo recomienda invertir {ratio_gads_meta:.1f}x más en GADS que en META (ROI GADS: {roi_gads_pct:.1f}% vs META: {roi_meta_pct:.1f}%)")
                     else:
                         st.info("💡 **Distribución balanceada**: Ambos canales tienen eficiencia similar, se recomienda distribución equilibrada.")
-
+                
 # =============================================================================
 # PÁGINA 4: ENCONTRAR PRESUPUESTO ÓPTIMO
 # =============================================================================
@@ -1663,6 +1593,45 @@ elif page == "📉 Encontrar Presupuesto Óptimo":
             
             # Resultados principales
             st.success("✅ Análisis completado")
+            
+            # ============================================================
+            # VALIDACIÓN: R² de curvas Hill (INMEDIATAMENTE DESPUÉS DEL BOTÓN)
+            # ============================================================
+            
+            warnings_sat = []
+            if curvas_hill and selected_client in curvas_hill:
+                curva = curvas_hill[selected_client]
+                r2_meta = curva["META"]["r2"] if curva["META"] else None
+                r2_gads = curva["GADS"]["r2"] if curva["GADS"] else None
+                
+                if r2_meta and r2_meta < 0.70:
+                    warnings_sat.append(f"⚠️ R² curva META = {r2_meta:.3f} (< 0.70) - Curva NO confiable")
+                
+                if r2_gads and r2_gads < 0.70:
+                    warnings_sat.append(f"⚠️ R² curva GADS = {r2_gads:.3f} (< 0.70) - Curva NO confiable")
+                
+                if not curva["META"] and not curva["GADS"]:
+                    warnings_sat.append(f"❌ No hay curvas Hill para {selected_client}")
+            
+            if warnings_sat:
+                st.warning("⚠️ **ADVERTENCIA: Curvas de respuesta con baja confiabilidad**")
+                for warning in warnings_sat:
+                    st.markdown(f"- {warning}")
+                st.info("""
+                **¿Qué significa esto?**
+                - Las curvas Hill de este cliente no ajustan bien los datos históricos (R² < 0.70)
+                - El análisis de saturación puede no ser preciso
+                
+                **¿Qué hacer?**
+                - ✅ Usa el modelo pooled (R² = 0.90) como referencia general
+                - ✅ Revisa datos históricos en pestaña "Datos"
+                - ✅ Espera más observaciones para mejorar el ajuste
+                - ⚠️ Toma estas cifras con precaución
+                """)
+            else:
+                st.success("✅ Curvas de respuesta confiables (R² > 0.70)")
+            
+            st.markdown("---")
             
             st.subheader("🎯 Presupuesto Óptimo Recomendado")
             
@@ -1749,78 +1718,6 @@ elif page == "📉 Encontrar Presupuesto Óptimo":
             - ROI de {sat_analysis['optimal_roi']*100:.0f}%
             - ROAS de {sat_analysis['optimal_roas']:.2f}x (cada $1 invertido genera ${sat_analysis['optimal_roas']:.2f} de revenue)
             """)
-            
-            # ============================================================
-            # VALIDACIONES DE CONFIABILIDAD
-            # ============================================================
-            
-            warnings_sat = []
-            is_reliable_sat = True
-            
-            # 1. Verificar R² de curvas Hill
-            if curvas_hill and selected_client in curvas_hill:
-                curva = curvas_hill[selected_client]
-                
-                r2_meta = curva["META"]["r2"] if curva["META"] else None
-                r2_gads = curva["GADS"]["r2"] if curva["GADS"] else None
-                
-                if r2_meta and r2_meta < 0.70:
-                    warnings_sat.append(f"⚠️ R² curva META = {r2_meta:.3f} (< 0.70) - Análisis de saturación NO confiable")
-                    is_reliable_sat = False
-                
-                if r2_gads and r2_gads < 0.70:
-                    warnings_sat.append(f"⚠️ R² curva GADS = {r2_gads:.3f} (< 0.70) - Análisis de saturación NO confiable")
-                    is_reliable_sat = False
-            
-            # 2. Sanity checks (ajustados según calidad de curvas)
-            # Si curvas tienen R² alto, permitir métricas más agresivas
-            has_good_curves_sat = (r2_meta and r2_meta > 0.70) or (r2_gads and r2_gads > 0.70)
-            
-            if has_good_curves_sat:
-                roi_threshold_sat = 50.0  # 5000%
-                roas_threshold_sat = 100.0  # 100x
-            else:
-                roi_threshold_sat = 5.0  # 500%
-                roas_threshold_sat = 10.0  # 10x
-            
-            if sat_analysis['optimal_roi'] > roi_threshold_sat:
-                warnings_sat.append(f"🚨 ROI óptimo = {sat_analysis['optimal_roi']*100:.0f}% es extremadamente alto (> {roi_threshold_sat*100:.0f}%)")
-                is_reliable_sat = False
-            
-            if sat_analysis['optimal_roas'] > roas_threshold_sat:
-                warnings_sat.append(f"🚨 ROAS óptimo = {sat_analysis['optimal_roas']:.1f}x es extremadamente alto (> {roas_threshold_sat:.0f}x)")
-                is_reliable_sat = False
-            
-            # Mostrar alertas si hay problemas
-            if warnings_sat:
-                st.error("⚠️ **ANÁLISIS DE SATURACIÓN NO CONFIABLE**")
-                st.warning("""
-                **El análisis NO es confiable debido a:**
-                """)
-                for warning in warnings_sat:
-                    st.markdown(f"- {warning}")
-                
-                st.info(f"""
-                **¿Por qué?**
-                
-                El análisis de saturación depende de las curvas Hill individuales.
-                Si las curvas tienen R² bajo, las predicciones de profit/ROI son incorrectas.
-                
-                **Para {selected_client}:**
-                - R² META: {f'{r2_meta:.3f}' if r2_meta is not None else 'N/A'}
-                - R² GADS: {f'{r2_gads:.3f}' if r2_gads is not None else 'N/A'}
-                
-                **¿Qué hacer?**
-                
-                1. ❌ **NO uses estos resultados** para decisiones de inversión
-                2. ✅ **Revisa datos históricos** en pestaña "Datos"
-                3. ✅ **Espera más observaciones** para ajustar mejor las curvas
-                4. ✅ **Usa modelos pooled** como referencia general
-                
-                **Clientes con R² > 0.70** tienen análisis confiables.
-                """)
-            else:
-                st.success("✅ Análisis de saturación confiable - R² de curvas Hill > 0.70")
             
             # Gráfico 1: Profit vs Presupuesto
             st.subheader("📈 Curva de Profit vs Presupuesto")
@@ -2061,14 +1958,6 @@ elif page == "📉 Encontrar Presupuesto Óptimo":
             - ✅ Distribución META/GADS: Basada en curvas de respuesta Hill
             """)
             
-            if sat_analysis['optimal_profit'] < 0:
-                st.error("""
-                ⚠️ **Alerta:** El profit máximo es negativo. Esto significa que:
-                - El ticket promedio es muy bajo para este cliente
-                - Los costos de adquisición son muy altos
-                - Se recomienda: 1) Revisar ticket promedio, 2) Mejorar eficiencia de campañas, 3) Considerar no invertir en medios pagos
-                """)
-
 # =============================================================================
 # PÁGINA 5: DASHBOARDS
 # =============================================================================
@@ -2177,15 +2066,17 @@ st.sidebar.info("""
    - Optimiza: Monto total + distribución
    - Puede recomendar gastar MENOS
 
-**✨ Funcionalidades:**
-- ✅ Basado en curvas de respuesta Hill
-- ✅ Transacciones INCREMENTALES
-- ✅ Resultados por canal (META/GADS)
-- ✅ Análisis de saturación
-- ✅ Validaciones de confiabilidad
+**🔧 Cómo Funciona:**
+- ✅ Curvas de respuesta Hill por cliente y canal
+- ✅ Optimizador SLSQP con restricciones
+- ✅ Grid search con granularidad fija ($50)
+- ✅ Transacciones INCREMENTALES (sin baseline)
+- ✅ Distribución basada en curvas reales
+- ✅ Validaciones de confiabilidad (R²)
 
-**📊 R² Test**: """ + (f"{model['metrics']['r2_test']:.4f}" if model else "No cargado") + """
-""")
+**📊 Modelo**: R² Test = """ + (f"{model['metrics']['r2_test']:.4f}" if model else "No cargado") + """
+""")  
+
 
 st.sidebar.markdown("---")
-st.sidebar.caption("v5.0.0 - Reestructuración: Dos secciones claras (Distribuir Fijo vs Encontrar Óptimo). Distribución basada en curvas de respuesta.")
+st.sidebar.caption("v5.2.0 - Validaciones SOLO R² (no ROI/ROAS). Aparecen INMEDIATAMENTE después del botón.")

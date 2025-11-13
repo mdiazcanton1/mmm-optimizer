@@ -19,7 +19,8 @@ Este proyecto implementa un **Marketing Mix Model (MMM)** que permite:
 ├── 2_Modelo_MMM.ipynb                    # Entrenamiento del modelo pooled
 ├── 3_Curvas_Respuesta_Optimizacion.ipynb # Generación de curvas Hill
 ├── app_streamlit_pooled.py               # Aplicación web interactiva
-├── EJECUTAR_AQUI.bat                     # Script para ejecutar la app
+├── EJECUTAR_AQUI.bat                     # Script para ejecutar la app (Windows)
+├── EJECUTAR_AQUI.sh                      # Script para ejecutar la app (Mac/Linux)
 ├── ajustar_curvas_por_cliente.py         # Generación de curvas Hill
 ├── cargar_modelo_notebook.py             # Carga del modelo entrenado
 ├── dataset_consolidado_completo.csv      # Dataset principal
@@ -68,10 +69,13 @@ EJECUTAR_AQUI.bat
 
 **Linux/Mac:**
 ```bash
-python -m streamlit run app_streamlit_pooled.py
+chmod +x EJECUTAR_AQUI.sh
+./EJECUTAR_AQUI.sh
 ```
 
 La app se abrirá en `http://localhost:8501`
+
+> **⚠️ IMPORTANTE:** NO ejecutes directamente `python -m streamlit run app_streamlit_pooled.py` ya que la app necesita que ciertos archivos se generen primero. Usa siempre los scripts `EJECUTAR_AQUI.bat` (Windows) o `EJECUTAR_AQUI.sh` (Mac/Linux).
 
 > **Nota:** Los archivos generados (modelos, curvas, datasets procesados) ya están incluidos en el repositorio. ¡Puedes ejecutar la app inmediatamente sin correr los notebooks!
 
@@ -81,8 +85,15 @@ La app se abrirá en `http://localhost:8501`
 
 **Los archivos ya están generados** ✅ - Solo ejecuta:
 
+**Windows:**
 ```bash
 EJECUTAR_AQUI.bat
+```
+
+**Mac/Linux:**
+```bash
+chmod +x EJECUTAR_AQUI.sh
+./EJECUTAR_AQUI.sh
 ```
 
 La app abrirá con 5 páginas interactivas:
@@ -105,7 +116,7 @@ Si quieres regenerar los archivos desde cero:
 3. **Ejecutar Notebook 3**: `3_Curvas_Respuesta_Optimizacion.ipynb`
    - Genera: `curvas_hill_por_cliente.pkl`
 
-4. **Ejecutar App**: `EJECUTAR_AQUI.bat`
+4. **Ejecutar App**: `EJECUTAR_AQUI.bat` (Windows) o `./EJECUTAR_AQUI.sh` (Mac/Linux)
 
 ## 🔧 Tecnologías Utilizadas
 
